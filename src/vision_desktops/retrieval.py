@@ -45,6 +45,10 @@ _STATS: "object" = __import__("collections").deque(maxlen=200)
 _DECIDER_Q: "queue.Queue" = queue.Queue()
 _DECIDER_ONCE = threading.Lock()
 _DECIDER_STARTED = [False]
+_DECIDER_SEQ = [0]
+_DECIDER_SEQ_LOCK = threading.Lock()
+_DECIDER_CANCEL: set = set()          # seq -> nach Timeout verworfen
+_DECIDER_CANCEL_LOCK = threading.Lock()
 
 # Set by the server: rest() = hop mutex free AND no open verification step.
 _REST_FN = [lambda: not hop.hop_busy()]
@@ -61,6 +65,20 @@ def is_rest() -> bool:
         return not hop.hop_busy()
 
 
+def _decider_fail_all(exc: BaseException) -> None:
+    """Alle eingereihten Decider-Jobs sofort mit `exc` absagen."""
+    while True:
+        try:
+            _seq, fn, result_q = _DECIDER_Q.get_nowait()
+        except queue.Empty:
+            return
+        try:
+            result_q.put(("err", exc))
+        except Exception:  # noqa: BLE001
+            log.debug("swallowed in _decider_fail_all() (result_q) "
+                      "(was silent pass)", exc_info=True)
+
+
 def _ensure_decider() -> None:
     with _DECIDER_ONCE:
         if _DECIDER_STARTED[0]:
@@ -68,23 +86,52 @@ def _ensure_decider() -> None:
         _DECIDER_STARTED[0] = True
 
     def _loop():
-        while True:
-            fn, result_q = _DECIDER_Q.get()
-            try:
-                result_q.put(("ok", fn()))
-            except BaseException as exc:  # noqa: BLE001
-                result_q.put(("err", exc))
+        try:
+            while True:
+                seq, fn, result_q = _DECIDER_Q.get()
+                with _DECIDER_CANCEL_LOCK:
+                    if int(seq) in _DECIDER_CANCEL:
+                        _DECIDER_CANCEL.discard(int(seq))
+                        continue  # Job nach Timeout verworfen
+                try:
+                    result_q.put(("ok", fn()))
+                except BaseException as exc:  # noqa: BLE001
+                    result_q.put(("err", exc))
+        except BaseException as exc:  # noqa: BLE001
+            # Decider gestorben: Reste der Schlange abmelden (niemand darf
+            # bis zum Timeout warten) und Neustart erlauben.
+            log.debug("swallowed in _decider _loop() (decider died)",
+                      exc_info=True)
+            _decider_fail_all(exc)
+            with _DECIDER_ONCE:
+                _DECIDER_STARTED[0] = False
 
     threading.Thread(target=_loop, daemon=True, name="vision-decider").start()
 
 
 def _decider_call(fn, timeout: float = 30.0):
     """Only for fast move decisions (ms). Launch loops run in the caller
-    thread so parallel launches do not serialize for up to 45 s."""
+    thread so parallel launches do not serialize for up to 45 s.
+
+    Robustheit (Punkt 10): queue.Empty wird in eine klare Meldung
+    uebersetzt, und der Job wird nach einem Timeout VERWORfen - sonst
+    liefe die Entscheidung spaeter unsichtbar nach."""
     _ensure_decider()
     result_q: "queue.Queue" = queue.Queue()
-    _DECIDER_Q.put((fn, result_q))
-    status, value = result_q.get(timeout=timeout)
+    with _DECIDER_SEQ_LOCK:
+        _DECIDER_SEQ[0] += 1
+        seq = _DECIDER_SEQ[0]
+    _DECIDER_Q.put((seq, fn, result_q))
+    try:
+        status, value = result_q.get(timeout=timeout)
+    except queue.Empty as exc:
+        with _DECIDER_CANCEL_LOCK:
+            _DECIDER_CANCEL.add(seq)
+            if len(_DECIDER_CANCEL) > 10000:
+                _DECIDER_CANCEL.clear()
+        raise RuntimeError(
+            f"decider gave no answer within {timeout:.0f}s - the queued job "
+            f"was discarded (decider stuck or blocked)") from exc
     if status == "err":
         raise value if isinstance(value, BaseException) else RuntimeError(str(value))
     return value

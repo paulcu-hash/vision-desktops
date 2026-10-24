@@ -33,7 +33,14 @@ COINIT_APARTMENTTHREADED = 0x2
 class _ComWorker:
     """COM apartment thread with priority (v2): hop/switch (prio 0) before moves
     (prio 1). Three threads: hook only reports, decider queues moves, COM
-    executes - hop calls always take precedence over moves."""
+    executes - hop calls always take precedence over moves.
+
+    Robustheit (Punkt 10): der Start (pyvda-Import) laeuft im try - schlaegt
+    er fehl, bekommen ALLE Wartenden sofort den Fehler statt einer
+    60-s-Warteschlange mit queue.Empty. Zeitueberschreitungen wandeln sich
+    in eine klare Meldung um und VERWERFEN den Job (keine Aktion, die erst
+    spaeter unsichtbar ausgefuehrt wird). Stirbt der Worker unerwartet,
+    werden die Reste der Warteschlange ebenfalls abgemeldet."""
 
     def __init__(self):
         self._queue: "queue.PriorityQueue" = queue.PriorityQueue()
@@ -41,34 +48,82 @@ class _ComWorker:
         self._counter_lock = threading.Lock()
         self._thread = None
         self._lock = threading.Lock()
+        self._cancel: set = set()          # seq -> nach Timeout verworfen
+        self._cancel_lock = threading.Lock()
+
+    def _fail_all(self, exc: BaseException) -> None:
+        """Jede Anfrage in der Schlange sofort mit `exc` absagen."""
+        while True:
+            try:
+                _prio, _seq, fn, result_q = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                result_q.put(("err", exc))
+            except Exception:  # noqa: BLE001 (leere/geleakte Queue)
+                log.debug("swallowed in _fail_all() (result_q) (was silent pass)",
+                          exc_info=True)
 
     def _run(self):
         try:
-            ctypes.windll.ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
-        except OSError:
-            log.debug("swallowed in _run() (was silent pass)", exc_info=True)
-        import pyvda  # noqa: F401 (load inside the COM apartment)
-
-        while True:
-            _prio, _seq, fn, result_q = self._queue.get()
             try:
-                result_q.put(("ok", fn()))
+                ctypes.windll.ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            except OSError:
+                log.debug("swallowed in _run() (was silent pass)", exc_info=True)
+            try:
+                import pyvda  # noqa: F401 (load inside the COM apartment)
             except BaseException as exc:  # noqa: BLE001
-                result_q.put(("err", exc))
+                # Ohne pyvda kann KEIN Job laufen: alle Wartenden sofort
+                # informieren (Messung: Fehler in < 1 s statt nach 60 s).
+                # Der naechste Aufruf startet den Worker neu -> setzt sich
+                # selbst in Gang, sobald die Umgebung repariert ist.
+                log.debug("swallowed in _run() (pyvda import failed)",
+                          exc_info=True)
+                self._fail_all(exc)
+                return
+            while True:
+                _prio, seq, fn, result_q = self._queue.get()
+                with self._cancel_lock:
+                    if int(seq) in self._cancel:
+                        self._cancel.discard(int(seq))
+                        continue  # Job nach Timeout verworfen - nicht ausfuehren
+                try:
+                    result_q.put(("ok", fn()))
+                except BaseException as exc:  # noqa: BLE001
+                    result_q.put(("err", exc))
+        except BaseException as exc:  # noqa: BLE001
+            # Worker unerwartet gestorben: niemand darf auf ein leeres
+            # Ergebnis warten, und der naechste Aufruf darf neu starten.
+            log.debug("swallowed in _run() (COM worker died)", exc_info=True)
+            self._fail_all(exc)
 
     def call(self, fn, timeout: float = 60.0, priority: int = 0):
+        result_q: "queue.Queue" = queue.Queue()
+        with self._counter_lock:
+            self._counter += 1
+            seq = self._counter
+        # Job ZUERST einreihen, dann Worker sicherstellen: ein beim Start
+        # abbrechender Worker spuelt dann auch gerade diese Anfrage auf.
+        self._queue.put((int(priority), seq, fn, result_q))
         with self._lock:
             if self._thread is None or not self._thread.is_alive():
                 self._thread = threading.Thread(
                     target=self._run, daemon=True, name="vision-desktops-com"
                 )
                 self._thread.start()
-        result_q: "queue.Queue" = queue.Queue()
-        with self._counter_lock:
-            self._counter += 1
-            seq = self._counter
-        self._queue.put((int(priority), seq, fn, result_q))
-        status, value = result_q.get(timeout=timeout)
+        try:
+            status, value = result_q.get(timeout=timeout)
+        except queue.Empty as exc:
+            # Job nach Timeout verwerfen (spaeter keine doppelte Aktion)
+            # und queue.Empty in eine klare Meldung uebersetzen.
+            with self._cancel_lock:
+                self._cancel.add(seq)
+                if len(self._cancel) > 10000:
+                    self._cancel.clear()
+            raise RuntimeError(
+                f"COM call gave no answer within {timeout:.0f}s - the queued "
+                f"job was discarded (COM worker busy or stuck; check "
+                f"pyvda/COM in this environment)") from exc
         if status == "err":
             raise RuntimeError(f"{type(value).__name__}: {value}") from value
         return value
