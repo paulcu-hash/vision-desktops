@@ -12,7 +12,24 @@ import threading
 import time
 from ctypes import wintypes
 
-_user32 = ctypes.windll.user32
+import logging
+
+log = logging.getLogger(__name__)
+
+
+# EIGENE WinDLL-Instanzen - Absicht, keine Praezisionerei.
+# `ctypes.windll.user32` ist ein prozessweit gecachtes Singleton. Setzt
+# dieses Modul darauf argtypes mit SEINER RECT-Klasse (unten), und ein
+# anderes Modul (capture.py, harness, Plugin) mit seiner eigenen, gewinnt
+# der Zuletzt-Importierte: der andere wirft beim naechsten Aufruf
+# `ctypes.ArgumentError` ("expected LP_RECT instance instead of pointer to
+# RECT"), den sein eigener try/except schluckt -> still kaputt (Fenster
+# verlieren ihr rect, Aufgaben scheinen ohne Grund zu scheitern).
+# `ctypes.WinDLL(...)` erzeugt eine frische Instanz mit eigenen _FuncPtr:
+# unsere argtypes hier beruehren niemanden sonst mehr.
+_user32 = ctypes.WinDLL("user32")
+_kernel32 = ctypes.WinDLL("kernel32")
+_dwmapi = ctypes.WinDLL("dwmapi")
 
 _user32.EnumWindows.argtypes = [ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p), ctypes.c_void_p]
 _user32.EnumWindows.restype = wintypes.BOOL
@@ -203,7 +220,7 @@ def tree_pids(root_pids: list) -> set:
             for child in root.children(recursive=True):
                 out.add(child.pid)
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in tree_pids() (was silent pass)", exc_info=True)
     return out
 
 
@@ -255,7 +272,7 @@ def tree_contains(root_pids: list, pid: int) -> bool:
         if wpid in cached_tree_pids(root_pids):
             return True
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in tree_contains() (was silent pass)", exc_info=True)
     try:
         import psutil
 
@@ -263,7 +280,7 @@ def tree_contains(root_pids: list, pid: int) -> bool:
             if int(parent.pid) in roots:
                 return True
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in tree_contains() (was silent pass)", exc_info=True)
     return False
 
 
@@ -280,7 +297,7 @@ def kill_tree(pid: int) -> bool:
             try:
                 p.terminate()
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in kill_tree() (was silent pass)", exc_info=True)
         try:
             _, alive = psutil.wait_procs(procs, timeout=5)
         except Exception:  # noqa: BLE001
@@ -289,10 +306,62 @@ def kill_tree(pid: int) -> bool:
             try:
                 p.kill()
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in kill_tree() (was silent pass)", exc_info=True)
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+# --- PID-Identitaet (Recycling-Schutz) -----------------------------------
+# Windows vergibt PIDs wiederverwendet. Eine gespeicherte PID ist nach einem
+# Server-Neustart KEINE stabile Identitaet mehr: dieselbe Nummer kann dann
+# einem fremden Programm gehoeren. desktop_remove() wuerde sie sonst toeten
+# und _windows_of() waere sie "eigen" zaehlen. Anker ist die create_time.
+def pid_ctime(pid: int):
+    """Erstellzeit (epoch s) eines LEBDEN Prozesses - oder None (tot/fremd)."""
+    import psutil
+
+    try:
+        return psutil.Process(int(pid)).create_time()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def pid_live_as(pid, ctime) -> bool:
+    """True NUR wenn `pid` lebt UND seine create_time noch gleich `ctime`
+    ist - also JENES Prozess, den wir gestartet haben, keine recycelte PID.
+    ctime None (Legacy-Eintrag ohne Anker) -> False (fail-closed: unge-
+    pruefte PID nie toeten/zaehlen)."""
+    if not pid or ctime is None:
+        return False
+    now = pid_ctime(pid)
+    if now is None:
+        return False
+    try:
+        return abs(float(now) - float(ctime)) < 0.001
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def live_roots(pids) -> list:
+    """Nur die gespeicherten Wurzel-PIDs, die noch DERSELBE Prozess sind.
+    Verarbeitet altes Format (bare int) und neues Format
+    ({"pid":..,"ctime":..}). Legacy-Eintraege ohne Anker werden
+    ausgeschlossen (fail-closed)."""
+    out = []
+    for entry in (pids or []):
+        if isinstance(entry, dict):
+            pid = int(entry.get("pid", 0) or 0)
+            ctime = entry.get("ctime")
+        else:
+            try:
+                pid = int(entry)
+            except Exception:  # noqa: BLE001
+                continue
+            ctime = None
+        if pid and pid_live_as(pid, ctime):
+            out.append(pid)
+    return out
 
 
 def is_window(hwnd: int) -> bool:
@@ -327,7 +396,7 @@ def show_window(hwnd: int) -> None:
         else:
             _user32.ShowWindow(ctypes.c_void_p(hwnd), SW_SHOW)
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in show_window() (was silent pass)", exc_info=True)
 
 
 def restore_if_minimized(hwnd: int) -> None:
@@ -338,7 +407,7 @@ def restore_if_minimized(hwnd: int) -> None:
         if _user32.IsIconic(ctypes.c_void_p(hwnd)):
             _user32.ShowWindow(ctypes.c_void_p(hwnd), SW_RESTORE)
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in restore_if_minimized() (was silent pass)", exc_info=True)
 
 
 # Async show worker: a blocking ShowWindow (see above) must never stall the
@@ -367,7 +436,7 @@ def _ensure_show_worker() -> None:
             try:
                 show_window(int(hwnd))
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in _loop() (was silent pass)", exc_info=True)
 
     threading.Thread(target=_loop, daemon=True, name="vision-show").start()
 
@@ -390,7 +459,7 @@ def async_show(hwnd: int) -> None:
                 _SHOW_REQUESTED.add(int(hwnd))
         _SHOW_Q.put(int(hwnd))
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in async_show() (was silent pass)", exc_info=True)
 
 
 def hide_window(hwnd: int) -> None:
@@ -400,7 +469,7 @@ def hide_window(hwnd: int) -> None:
     try:
         _user32.ShowWindow(ctypes.c_void_p(int(hwnd)), SW_HIDE)
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in hide_window() (was silent pass)", exc_info=True)
 
 
 # Async hide worker: mirror of the show worker. Hiding itself is one fast
@@ -427,7 +496,7 @@ def _ensure_hide_worker() -> None:
             try:
                 hide_window(int(hwnd))
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in _loop() (was silent pass)", exc_info=True)
 
     threading.Thread(target=_loop, daemon=True, name="vision-hide").start()
 
@@ -445,7 +514,7 @@ def async_hide(hwnd: int) -> None:
             _HIDE_REQUESTED.add(int(hwnd))
         _HIDE_Q.put(int(hwnd))
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in async_hide() (was silent pass)", exc_info=True)
 
 
 def is_window_visible(hwnd: int) -> bool:
@@ -531,7 +600,9 @@ def _ensure_hook() -> None:
                 _hook_events.append((time.time(), _tick_now(), h, pid.value))
             _WAKE.set()  # never blocks; hook thread must never die.
         except Exception:  # noqa: BLE001
-            pass  # Hook thread must never die.
+            # Hook thread must never die.
+            log.debug("swallowed in hook _on_event() (hook thread guard)",
+                      exc_info=True)
 
     _hook_cb = _WinEventProc(_on_event)  # Reference must stay alive.
 
@@ -555,7 +626,6 @@ def _ensure_hook() -> None:
 def _tick_now() -> int:
     """ms since boot (GetTickCount64, monotonic). Used by the interaction guard."""
     try:
-        _kernel32 = ctypes.windll.kernel32
         _kernel32.GetTickCount64.restype = ctypes.c_ulonglong
         return int(_kernel32.GetTickCount64())
     except Exception:  # noqa: BLE001
@@ -574,7 +644,7 @@ def last_input_tick() -> int:
         if _user32.GetLastInputInfo(ctypes.byref(info)):
             return int(info.dwTime & 0xFFFFFFFF)
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in last_input_tick() (was silent pass)", exc_info=True)
     return 0
 
 
@@ -617,7 +687,7 @@ def owned_hwnds(owner_hwnd: int) -> list:
             except Exception:  # noqa: BLE001
                 continue
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in owned_hwnds() (was silent pass)", exc_info=True)
     return out
 
 
@@ -632,7 +702,7 @@ def owned_windows(owner_hwnd: int) -> list:
             except Exception:  # noqa: BLE001
                 continue
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in owned_windows() (was silent pass)", exc_info=True)
     return out
 
 
@@ -657,7 +727,7 @@ def frame_child_pids(hwnd: int) -> set:
             try:
                 cands.append(int(ctypes.c_void_p(ch).value or 0))
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in _cb() (was silent pass)", exc_info=True)
             return True
 
         _cb_ref = _cb  # Keep the reference alive during enum.
@@ -671,7 +741,7 @@ def frame_child_pids(hwnd: int) -> set:
             except Exception:  # noqa: BLE001
                 continue
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in frame_child_pids() (was silent pass)", exc_info=True)
     return pids
 
 
@@ -688,7 +758,7 @@ def job_create(key: str = ""):
     """Create a job object (one handle per launch group). Nested jobs: if
     create/assign fails later -> fallback to tree_pids, no error."""
     try:
-        k32 = ctypes.windll.kernel32
+        k32 = _kernel32
         k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
         k32.CreateJobObjectW.restype = ctypes.c_void_p
         h = k32.CreateJobObjectW(None, None)
@@ -705,7 +775,7 @@ def job_create(key: str = ""):
 def job_assign(job, pid: int) -> bool:
     """Attach a process to a job. Requires PROCESS_SET_QUOTA|TERMINATE."""
     try:
-        k32 = ctypes.windll.kernel32
+        k32 = _kernel32
         k32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         k32.AssignProcessToJobObject.restype = wintypes.BOOL
         k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
@@ -720,7 +790,7 @@ def job_assign(job, pid: int) -> bool:
             try:
                 k32.CloseHandle(ctypes.c_void_p(hproc))
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in job_assign() (was silent pass)", exc_info=True)
     except Exception:  # noqa: BLE001
         return False
 
@@ -730,7 +800,7 @@ def job_contains(job, pid: int) -> bool:
     if not job:
         return False
     try:
-        k32 = ctypes.windll.kernel32
+        k32 = _kernel32
         k32.IsProcessInJob.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
                                        ctypes.POINTER(wintypes.BOOL)]
         k32.IsProcessInJob.restype = wintypes.BOOL
@@ -748,7 +818,7 @@ def job_contains(job, pid: int) -> bool:
             try:
                 k32.CloseHandle(ctypes.c_void_p(hproc))
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in job_contains() (was silent pass)", exc_info=True)
     except Exception:  # noqa: BLE001
         return False
 
@@ -766,9 +836,9 @@ def launch_in_job(cmdline: str, cwd: str, job_key: str = "") -> dict:
             import subprocess as _sp  # only the fallback path uses Popen
             _ = _sp
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in launch_in_job() (was silent pass)", exc_info=True)
         try:
-            k32 = ctypes.windll.kernel32
+            k32 = _kernel32
             CREATE_SUSPENDED = 0x00000004
             CREATE_NO_WINDOW = 0x08000000
 
@@ -808,17 +878,17 @@ def launch_in_job(cmdline: str, cwd: str, job_key: str = "") -> dict:
                 try:
                     k32.ResumeThread(ctypes.c_void_p(pi.hThread))
                 except Exception:  # noqa: BLE001
-                    pass
+                    log.debug("swallowed in launch_in_job() (was silent pass)", exc_info=True)
                 try:
                     k32.CloseHandle(ctypes.c_void_p(pi.hThread))
                     k32.CloseHandle(ctypes.c_void_p(pi.hProcess))
                 except Exception:  # noqa: BLE001
-                    pass
+                    log.debug("swallowed in launch_in_job() (was silent pass)", exc_info=True)
                 invalidate_tree_cache()  # new pid: tree membership changed.
                 return {"pid": int(pi.dwProcessId), "job": job if assigned else None,
                         "used_job": bool(assigned)}
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in launch_in_job() (was silent pass)", exc_info=True)
     # Fallback: normal visible start (broker/store/explorer/nested-job).
     pid = launch_process(cmdline, cwd=cwd)
     invalidate_tree_cache()  # new pid: tree membership changed.
@@ -887,7 +957,7 @@ def wait_new_windows(before: set, root_pids: list, timeout: float,
                         if kids and (kids & pids):
                             prov = "tree"
                     except Exception:  # noqa: BLE001
-                        pass
+                        log.debug("swallowed in wait_new_windows() (was silent pass)", exc_info=True)
             except Exception:  # noqa: BLE001
                 prov = "foreign"
             provenance[h] = prov
@@ -940,7 +1010,6 @@ def wait_new_windows(before: set, root_pids: list, timeout: float,
 
 
 # --- v2 move chain helpers (ported 1:1 from the tested chain, vision-TEST) ---
-_dwmapi = ctypes.windll.dwmapi
 DWMWA_CLOAKED = 14  # 1 app / 2 shell / 4 inherited
 
 _user32.WindowFromPoint.argtypes = [wintypes.POINT]

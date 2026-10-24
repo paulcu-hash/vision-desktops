@@ -42,6 +42,7 @@ remember main -> target desktop -> click/type -> back on main -> next ...
 | `desktop_see` / `desktop_click` / `desktop_type` / `desktop_key` / `desktop_scroll` | Desktop level for system UI without an app window (Start/Run/Tray). Refuses Main hard |
 | `delta_list` / `delta_view` / `window_adopt` | Main delta without pixels (hwnd/PID/title/time+reason), targeted single view without retention, explicit adoption by vision verdict |
 | `show_main` | Emergency: back to desktop #1 |
+| `diagnose` | What the server swallowed: health facts + ring buffer of the last errors with tracebacks (formerly silent `except: pass`). CLI: `python -m vision_desktops.diagnose [--demo]` |
 
 Loop per desktop (window level): `see` -> decide -> `hop_*` -> verify via `see`.
 Loop for system UI (desktop level): `desktop_see` -> decide ->

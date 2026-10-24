@@ -26,7 +26,13 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ImageContent, TextContent
 
-from . import capture, hop, messages, retrieval, state, vdesk, windows
+from . import capture, errors, hop, messages, retrieval, state, vdesk, windows
+from . import diagnose as diagnose_module
+
+import logging
+
+log = logging.getLogger(__name__)
+
 
 mcp = FastMCP(
     "vision-desktops",
@@ -168,7 +174,7 @@ def _resolve(rec: dict, hwnd: int = 0, title_contains: str = "") -> dict:
 
 
 def _windows_of(rec: dict) -> list:
-    pids = set(windows.tree_pids(rec.get("pids", [])))
+    pids = set(windows.tree_pids(windows.live_roots(rec.get("pids", []))))
     tracked = set(rec.get("hwnds", []))
     out, alive = [], []
     for w in windows.all_windows(include_tool_windows=True):
@@ -195,7 +201,9 @@ def _launch_into(rec: dict, exe: str, args: str, wait_seconds: float) -> dict:
                                         wait_seconds, cwd=str(Path.home()),
                                         desktop_name=rec.get("name", ""))
     pid = int(res.get("pid", 0))
-    rec.setdefault("pids", []).append(pid)
+    # PID-Identitaet: als {pid,ctime} speichern, damit nach Neustart eine
+    # recycelte PID nicht als "eigen" gilt (fail-closed, s. live_roots).
+    rec.setdefault("pids", []).append({"pid": pid, "ctime": windows.pid_ctime(pid)})
     for h in res.get("moved_hwnds", []):
         if int(h) not in rec.get("hwnds", []):
             rec.setdefault("hwnds", []).append(int(h))
@@ -226,7 +234,7 @@ def _launch_into(rec: dict, exe: str, args: str, wait_seconds: float) -> dict:
             if w["hwnd"] in res.get("moved_hwnds", []):
                 moved_pids.append(w["pid"])
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _launch_into() (was silent pass)", exc_info=True)
     if result["handoff"] and moved_pids:
         result["foreign_owner_pid"] = moved_pids[0]
     if result["handoff"]:
@@ -313,7 +321,7 @@ def _ensure_graveyard() -> dict:
             if rec.get("desktop_id") in alive:
                 return rec
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in _ensure_graveyard() (was silent pass)", exc_info=True)
     info = vdesk.create_desktop(GRAVEYARD)
     rec = {"name": GRAVEYARD, "desktop_id": info["id"],
            "desktop_number": info["number"], "pids": [], "hwnds": [],
@@ -417,13 +425,17 @@ def desktop_remove(desktop: str, kill_apps: bool = True, decisions: dict | None 
             try:
                 windows.close_window(hwnd)
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in desktop_remove() (was silent pass)", exc_info=True)
         time.sleep(1.5)
         killed = []
         if kill_apps and alive_now and drop_hwnds >= set(alive_now):
             # Kill only on full approval for all live windows. Foreign PIDs
             # (handoff) are never in rec['pids'] and are therefore never hit.
-            for pid in rec.get("pids", []):
+            # PID-Identitaet: nach einem Neustart kann eine gespeicherte PID
+            # einem fremden Programm gehoeren (Windows recycelt PIDs).
+            # live_roots() verifiziert die create_time - fremde/geleakte
+            # PIDs werden NICHT getoetet (fail-closed).
+            for pid in windows.live_roots(rec.get("pids", [])):
                 if windows.kill_tree(pid):
                     killed.append(pid)
             time.sleep(1.5)
@@ -441,7 +453,7 @@ def desktop_remove(desktop: str, kill_apps: bool = True, decisions: dict | None 
         try:
             retrieval.watch_unregister(rec["desktop_id"])
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in desktop_remove() (was silent pass)", exc_info=True)
         vdesk.show_main()  # Rule: always show Main at the end.
         titles = {}
         try:
@@ -449,7 +461,7 @@ def desktop_remove(desktop: str, kill_apps: bool = True, decisions: dict | None 
                 if w["hwnd"] in survivors:
                     titles[w["hwnd"]] = w["title"]
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in desktop_remove() (was silent pass)", exc_info=True)
         # pending = whatever still lives without a park verdict (drop-approved
         # windows that survived via a dialog, plus everything without a
         # verdict). Dead windows without a verdict must never pass as "cleanly
@@ -822,7 +834,7 @@ def window_adopt(desktop: str, hwnd: int) -> list:
                                  "reason": "user-touched",
                                  "detail": messages.USER_TOUCHED_DETAIL})
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in window_adopt() (was silent pass)", exc_info=True)
             return _err(messages.adopt_user_touched(h))
         fg_before = windows.foreground_hwnd()
         outcome = vdesk.move_if_unpinned(h, rec["desktop_id"], priority=0,
@@ -832,7 +844,7 @@ def window_adopt(desktop: str, hwnd: int) -> list:
                 state.add_delta({"hwnd": h, "pid": retrieval.wintypes_pid(h),
                                  "title": retrieval._title_of(h), "reason": "pin"})
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in window_adopt() (was silent pass)", exc_info=True)
             return _err(messages.adopt_pinned(h))
         if outcome != "moved":
             try:
@@ -840,7 +852,7 @@ def window_adopt(desktop: str, hwnd: int) -> list:
                 outcome = vdesk.move_if_unpinned(h, rec["desktop_id"], priority=0,
                                          pixel=True)
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in window_adopt() (was silent pass)", exc_info=True)
             if outcome != "moved":
                 return _err(messages.adopt_failed(outcome))
         try:
@@ -848,12 +860,12 @@ def window_adopt(desktop: str, hwnd: int) -> list:
             # (it may arrive hidden from the ownership hide).
             windows.show_window(h)
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in window_adopt() (was silent pass)", exc_info=True)
         try:
             retrieval._resolve_hidden(h, show=False)
             retrieval.drop_watch_pending(rec["desktop_id"], h)
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in window_adopt() (was silent pass)", exc_info=True)
         try:
             for owned in windows.owned_hwnds(h):
                 try:
@@ -863,15 +875,15 @@ def window_adopt(desktop: str, hwnd: int) -> list:
                     try:
                         windows.show_window(owned)
                     except Exception:  # noqa: BLE001
-                        pass
+                        log.debug("swallowed in window_adopt() (was silent pass)", exc_info=True)
                     try:
                         retrieval._resolve_hidden(owned, show=False)
                     except Exception:  # noqa: BLE001
-                        pass
+                        log.debug("swallowed in window_adopt() (was silent pass)", exc_info=True)
                 except Exception:  # noqa: BLE001
                     continue
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in window_adopt() (was silent pass)", exc_info=True)
         try:
             if fg_before and windows.foreground_hwnd() != fg_before \
                     and windows.foreground_hwnd() == h:
@@ -879,18 +891,38 @@ def window_adopt(desktop: str, hwnd: int) -> list:
 
                 _ct.windll.user32.SetForegroundWindow(_ct.c_void_p(fg_before))
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in window_adopt() (was silent pass)", exc_info=True)
         if h not in rec.get("hwnds", []):
             rec.setdefault("hwnds", []).append(h)
             state.put_desktop(rec)
         try:
             state.drop_delta(h)
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in window_adopt() (was silent pass)", exc_info=True)
         return _txt({"adopted": h, "desktop": desktop})
     except Exception as exc:  # noqa: BLE001
         return _tool_err(exc)
 
 
+@mcp.tool()
+def diagnose(limit: int = 20) -> list:
+    """Show what the server swallowed: health facts + the ring buffer of the
+    last errors (time, level, logger, message, traceback - newest first).
+
+    Use this whenever a tool result looks like a silent failure: former
+    `except: pass` spots now log with exc_info=True and land here. Also run
+    `python -m vision_desktops.diagnose --demo` in the server's env to prove
+    a ctypes.ArgumentError is captured."""
+    try:
+        return _txt({"diagnose": diagnose_module.report(int(limit))})
+    except Exception as exc:  # noqa: BLE001
+        return _tool_err(exc)
+
+
 def main():
+    # Ringpuffer installieren, BEVOR der Serverarbeit beginnt: alles, was
+    # Module unten schlucken (log.debug + exc_info), landet fuer das
+    # `diagnose`-Tool im Speicher. Nie stdout (MCP-Transport), optional
+    # stderr via VISION_DESKTOPS_LOG=stderr.
+    errors.install()
     mcp.run()

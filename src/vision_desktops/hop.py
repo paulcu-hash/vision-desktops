@@ -26,8 +26,21 @@ from ctypes import wintypes
 
 from . import capture, vdesk
 
-_user32 = ctypes.windll.user32
-_kernel32 = ctypes.windll.kernel32
+import logging
+
+log = logging.getLogger(__name__)
+
+
+# EIGENE WinDLL-Instanzen - Absicht, keine Praezisionerei.
+# `ctypes.windll.*` ist prozessweit gecachtes Singleton: unsere argtypes
+# (unten ~30 Stellen) gaelten sonst auch fuer JEDE andere Codebasis im
+# selben Prozess. Kollidiert deren RECT/Struktur mit unseren, wirft der
+# andere ctypes.ArgumentError - meist in schluckendem try/except -> still
+# kaputt (der argtypes-Clobbering-Bug, in vision-TEST reproduziert).
+# WinDLL() = eigene Instanz mit eigenen _FuncPtr: unsere argtypes bleiben
+# unsers.
+_user32 = ctypes.WinDLL("user32")
+_kernel32 = ctypes.WinDLL("kernel32")
 
 # Hop occupancy for the collision clause + interaction guard (v2).
 # _HOP_ACTIVE: in-process counter; mutex covers cross-process.
@@ -65,7 +78,7 @@ def hop_busy() -> bool:
             try:
                 _kernel32.CloseHandle(h)
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in hop_busy() (was silent pass)", exc_info=True)
     except Exception:  # noqa: BLE001
         return _HOP_ACTIVE[0] > 0
 
@@ -78,7 +91,7 @@ def is_own_input_tick(tick: int) -> bool:
             if (int(a) & 0xFFFFFFFF) <= t <= (int(b) & 0xFFFFFFFF) + 500:
                 return True
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in is_own_input_tick() (was silent pass)", exc_info=True)
     return False
 
 
@@ -275,7 +288,7 @@ def _foreground(hwnd: int) -> None:
             _user32.SetWindowPos(ctypes.c_void_p(hwnd), ctypes.c_void_p(HWND_TOP),
                                  0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in _foreground() (was silent pass)", exc_info=True)
         time.sleep(0.2)
         fg = _fg()
         last_fg = fg
@@ -329,7 +342,7 @@ def _await_focus(hwnd: int, timeout: float = 2.0) -> None:
                         time.sleep(0.2)  # one beat of quiet after focus arrival
                         return
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in _await_focus() (was silent pass)", exc_info=True)
         time.sleep(0.1)
     raise RuntimeError(
         f"No keyboard focus in window {hwnd} within {timeout:.0f}s "
@@ -462,7 +475,9 @@ def _type_via_clipboard(text: str) -> None:
                 finally:
                     _user32.CloseClipboard()
         except Exception:  # noqa: BLE001
-            pass  # Restore is a courtesy, no reason to fail.
+            # Restore is a courtesy, no reason to fail.
+            log.debug("swallowed in _type_via_clipboard() (clipboard restore)",
+                      exc_info=True)
 
 
 def _vk_press(vk: int) -> None:
@@ -579,17 +594,17 @@ def desktop_session(desktop_id: str):
                 vdesk.show_main()
                 time.sleep(0.12)
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in desktop_session() (was silent pass)", exc_info=True)
             if has_cursor:
                 try:
                     _user32.SetCursorPos(saved_cursor.x, saved_cursor.y)
                 except Exception:  # noqa: BLE001
-                    pass
+                    log.debug("swallowed in desktop_session() (was silent pass)", exc_info=True)
             _HOP_ACTIVE[0] = max(0, _HOP_ACTIVE[0] - 1)
             try:
                 _HOP_INTERVALS.append((tick_start, _tick_now()))
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in desktop_session() (was silent pass)", exc_info=True)
 
 
 def _enter_desktop(desktop_id: str) -> str:

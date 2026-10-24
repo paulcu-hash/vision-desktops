@@ -22,6 +22,11 @@ import time
 
 from . import capture, windows
 
+import logging
+
+log = logging.getLogger(__name__)
+
+
 COINIT_APARTMENTTHREADED = 0x2
 
 
@@ -41,7 +46,7 @@ class _ComWorker:
         try:
             ctypes.windll.ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
         except OSError:
-            pass
+            log.debug("swallowed in _run() (was silent pass)", exc_info=True)
         import pyvda  # noqa: F401 (load inside the COM apartment)
 
         while True:
@@ -110,7 +115,7 @@ def create_desktop(label: str) -> dict:
         try:
             vd.rename(f"vision-{label}")
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in run() (was silent pass)", exc_info=True)
         return {"id": norm_guid(vd.id), "number": vd.number}
 
     return _COM.call(run)
@@ -184,7 +189,7 @@ def _cloak_on(av, hwnd: int, budget: float) -> bool:
     try:
         raw.SetCloak(1, 1)
     except Exception:  # noqa: BLE001 (may still have applied - poll decides)
-        pass
+        log.debug("swallowed in _cloak_on() (was silent pass)", exc_info=True)
     if _poll_hidden(hwnd, budget):
         return True
     try:
@@ -192,7 +197,7 @@ def _cloak_on(av, hwnd: int, budget: float) -> bool:
         time.sleep(0.1)
         raw.SetCloak(1, 1)
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _cloak_on() (was silent pass)", exc_info=True)
     return _poll_hidden(hwnd, budget)
 
 
@@ -211,7 +216,7 @@ def _cloak_off(av) -> None:
         try:
             raw.SetCloak(bit, 0)
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in _cloak_off() (was silent pass)", exc_info=True)
 
 
 def _note_view_error(hwnd: int, exc: BaseException) -> None:
@@ -233,7 +238,7 @@ def _top(hwnd: int, on: bool) -> None:
             ctypes.c_void_p(-1 if on else -2),
             0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _top() (was silent pass)", exc_info=True)
 
 
 def _shot(region):
@@ -276,7 +281,7 @@ def _chain(av, hwnd: int, desktop_id: str, check_pin: bool, pixel: bool) -> str:
             if av.is_pinned() or av.is_app_pinned():
                 return done("pin")
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in done() (was silent pass)", exc_info=True)
     target = norm_guid(desktop_id)
     try:
         on_target = norm_guid(av.desktop_id) == target
@@ -444,7 +449,7 @@ def _chain(av, hwnd: int, desktop_id: str, check_pin: bool, pixel: bool) -> str:
         try:
             av.move(vd)
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in done() (was silent pass)", exc_info=True)
         time.sleep(DESK_RETRY_S)
     info["desk"] = desk_ok
     if region:
@@ -595,7 +600,7 @@ def show_main() -> None:
     try:
         switch_to(main_id())
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in show_main() (was silent pass)", exc_info=True)
 
 
 def remove_desktop(desktop_id: str) -> None:

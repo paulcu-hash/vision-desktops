@@ -10,8 +10,15 @@ import ctypes
 import io
 from ctypes import wintypes
 
-_user32 = ctypes.windll.user32
-_gdi32 = ctypes.windll.gdi32
+# EIGENE WinDLL-Instanzen - Absicht, keine Praezisionerei.
+# `ctypes.windll.user32` ist prozessweit gecachtes Singleton: argtypes,
+# die wir hier setzen, gelten DANACH fuer JEDE andere Codebasis im selben
+# Prozess (andere Module, hinzugeladene Plugins, Test-Harnesses). Deren
+# Aufrufe wirfen dann ctypes.ArgumentError ("expected LP_RECT instance
+# instead of pointer to RECT"), meist in einem schluckenden try/except ->
+# still kaputt statt sichtbar kaputt. Eigene Instanz = eigene argtypes.
+_user32 = ctypes.WinDLL("user32")
+_gdi32 = ctypes.WinDLL("gdi32")
 
 PW_CLIENTONLY = 0x00000001
 PW_RENDERFULLCONTENT = 0x00000002

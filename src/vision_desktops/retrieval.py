@@ -16,6 +16,11 @@ import time
 
 from . import hop, messages, state, vdesk, windows
 
+import logging
+
+log = logging.getLogger(__name__)
+
+
 # Open points (measure, don't guess): queue cap + usage window.
 COLLISION_QUEUE_MAX_S = 2.0
 QUOTA_PER_HWND = 3
@@ -255,7 +260,7 @@ def _resolve_hidden(hwnd: int, show: bool) -> str | None:
         try:
             windows.async_show(h)  # visible on target, never blocks decider
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in _resolve_hidden() (was silent pass)", exc_info=True)
         return "moved"
     try:
         alive = windows.is_window(h)
@@ -268,21 +273,21 @@ def _resolve_hidden(hwnd: int, show: bool) -> str | None:
     try:
         windows.show_window(h)  # caller/watcher thread, never the decider
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _resolve_hidden() (was silent pass)", exc_info=True)
     try:
         if windows.is_window_visible(h):
             with _HIDE_LOCK:
                 _HIDE_STATS["restored"] += 1
             return "restored"
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _resolve_hidden() (was silent pass)", exc_info=True)
     try:
         if not windows.is_window(h):
             with _HIDE_LOCK:
                 _HIDE_STATS["gone"] += 1
             return "gone"
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _resolve_hidden() (was silent pass)", exc_info=True)
     with _HIDE_LOCK:
         _HIDE_STATS["restore_failed"] += 1
     return "restore_failed"
@@ -313,14 +318,14 @@ def _restore_all_hidden_at_exit() -> None:
         try:
             _resolve_hidden(h, show=True)
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in _restore_all_hidden_at_exit() (was silent pass)", exc_info=True)
 
 
 try:
     import atexit as _atexit
     _atexit.register(_restore_all_hidden_at_exit)
 except Exception:  # noqa: BLE001
-    pass
+    log.debug("swallowed in <modul>() (was silent pass)", exc_info=True)
 
 
 def _appear_tick(hwnd: int, since_wall: float) -> int:
@@ -329,7 +334,7 @@ def _appear_tick(hwnd: int, since_wall: float) -> int:
             if int(h) == int(hwnd):
                 return int(tick)
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _appear_tick() (was silent pass)", exc_info=True)
     try:
         return int(windows._tick_now())
     except Exception:  # noqa: BLE001
@@ -344,7 +349,7 @@ def _appear_wall(hwnd: int, since_wall: float, fallback: float) -> float:
             if int(h) == int(hwnd):
                 return float(wt)
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _appear_wall() (was silent pass)", exc_info=True)
     return float(fallback)
 
 
@@ -378,7 +383,7 @@ def _in_other_inflight(wpid: int, own_roots: list) -> bool:
             except Exception:  # noqa: BLE001
                 continue
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _in_other_inflight() (was silent pass)", exc_info=True)
     return False
 
 
@@ -437,7 +442,7 @@ def _try_move(hwnd: int, desktop_id: str, appear_wall: float,
     try:
         windows.async_show(hwnd)
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _try_move() (was silent pass)", exc_info=True)
     # Owner co-move (generic): take owned popups of the same owner along.
     # Fast path without describe (no text round-trip per window).
     try:
@@ -450,11 +455,11 @@ def _try_move(hwnd: int, desktop_id: str, appear_wall: float,
                 try:
                     windows.async_show(owned)
                 except Exception:  # noqa: BLE001
-                    pass
+                    log.debug("swallowed in _try_move() (was silent pass)", exc_info=True)
             except Exception:  # noqa: BLE001
                 continue
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _try_move() (was silent pass)", exc_info=True)
     # Focus guard: only on actually lost foreground (before/after).
     try:
         fg_after = windows.foreground_hwnd()
@@ -464,9 +469,9 @@ def _try_move(hwnd: int, desktop_id: str, appear_wall: float,
 
                 _ct.windll.user32.SetForegroundWindow(_ct.c_void_p(fg_before))
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in _try_move() (was silent pass)", exc_info=True)
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _try_move() (was silent pass)", exc_info=True)
     # "already" burned no move: no quota, but same placement accounting.
     if not already:
         _quota_add(hwnd)
@@ -475,7 +480,7 @@ def _try_move(hwnd: int, desktop_id: str, appear_wall: float,
     try:
         _STATS.append({"hwnd": hwnd, "latency_ms": latency_ms, "t": time.time()})
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _try_move() (was silent pass)", exc_info=True)
     return {"moved": True,
             "reason": "already-on-target" if already else "box",
             "latency_ms": latency_ms, "queued_s": max(0.0, t0 - appear_wall)}
@@ -492,7 +497,7 @@ def _decide_move(hwnd: int, desktop_id: str, appear_wall: float,
     try:
         res["handling_ms"] = (time.time() - t0) * 1000.0
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _decide_move() (was silent pass)", exc_info=True)
     return res
 
 
@@ -504,18 +509,18 @@ def _provenance_of(job, root_pids: list, wpid: int, hwnd: int) -> str:
         if job is not None and windows.job_contains(job, int(wpid)):
             return "job"
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _provenance_of() (was silent pass)", exc_info=True)
     try:
         if windows.tree_contains(root_pids, int(wpid)):
             return "tree"
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _provenance_of() (was silent pass)", exc_info=True)
     try:
         kids = windows.frame_child_pids(int(hwnd))
         if kids and (kids & windows.cached_tree_pids(root_pids)):
             return "tree"
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _provenance_of() (was silent pass)", exc_info=True)
     return "foreign"
 
 
@@ -568,7 +573,7 @@ def _handle_candidate(desktop_id: str, h: int, wpid: int, appear_wall: float,
         try:
             windows.async_hide(h)
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in _handle_candidate() (was silent pass)", exc_info=True)
     if not is_rest():
         now_q = time.time()
         pending.append((h, appear_wall, appear_tick, now_q, "collision",
@@ -610,7 +615,7 @@ def _drain_pending(desktop_id: str, pending: list, moved: list,
         pending = sorted(pending,
                          key=lambda t: -windows.client_area(int(t[0])))
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _drain_pending() (was silent pass)", exc_info=True)
     still: list = []
     for (h, awall, atick, enq, kind, deadline) in pending:
         if not windows.is_window(h):
@@ -724,14 +729,14 @@ def launch_and_retrieve(desktop_id: str, exe: str, args: str,
                     known.add(h)
                     cands.append(h)
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in launch_and_retrieve() (was silent pass)", exc_info=True)
             try:
                 for (_wt, _tick, h, _p) in windows.hook_events_since(entry_wall - 3.0):
                     if h not in known:
                         known.add(h)
                         cands.append(h)
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in launch_and_retrieve() (was silent pass)", exc_info=True)
             for h in _order_largest_first(cands):
                 h = int(h)
                 # Provenance before description: the pid is one cheap call,
@@ -778,7 +783,7 @@ def launch_and_retrieve(desktop_id: str, exe: str, args: str,
         try:
             watch_register(desktop_name or desktop_id, desktop_id, job, root_pids)
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("swallowed in launch_and_retrieve() (was silent pass)", exc_info=True)
         for (h, _awall, _atick, _enq, kind, _deadline) in list(pending):
             try:
                 if not windows.is_window(h):
@@ -808,7 +813,7 @@ def launch_and_retrieve(desktop_id: str, exe: str, args: str,
                                         (h, _awall, _atick, _enq, kind, _deadline))
                                     continue
                     except Exception:  # noqa: BLE001
-                        pass
+                        log.debug("swallowed in launch_and_retrieve() (was silent pass)", exc_info=True)
                 reason = ("queue-overflow" if kind == "collision" else "move-failed: view-not-ready")
                 _resolve_hidden(h, show=True)  # visible again on Main
                 _notready_reset(h)
@@ -816,7 +821,7 @@ def launch_and_retrieve(desktop_id: str, exe: str, args: str,
                 if e:
                     delta.append(e)
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in launch_and_retrieve() (was silent pass)", exc_info=True)
         handoff = (len(moved_hwnds) == 0 and len(delta) > 0)
         time.sleep(0.3)
         return {"pid": pid, "moved_windows": moved, "moved_hwnds": moved_hwnds,
@@ -889,7 +894,7 @@ def watch_unregister(desktop_id: str) -> None:
             try:
                 _resolve_hidden(h, show=True)
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in watch_unregister() (was silent pass)", exc_info=True)
 
 
 def drop_watch_pending(desktop_id: str, hwnd: int) -> None:
@@ -907,7 +912,7 @@ def drop_watch_pending(desktop_id: str, hwnd: int) -> None:
             watch["pending"] = [t for t in watch.get("pending", [])
                                 if int(t[0]) != h]
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in drop_watch_pending() (was silent pass)", exc_info=True)
 
 
 def watch_list() -> list:
@@ -940,7 +945,7 @@ def _watch_add_to_rec(desktop_id: str, hwnd: int) -> None:
             rec.setdefault("hwnds", []).append(int(hwnd))
             _state.put_desktop(rec)
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("swallowed in _watch_add_to_rec() (was silent pass)", exc_info=True)
 
 
 # Fast tick while work exists (timeline probe 14.10.2026): pending
@@ -973,15 +978,15 @@ def _ensure_watcher() -> None:
                 windows.wait_for_window_event(
                     WATCH_BUSY_S if _any_pending() else WATCH_FALLBACK_S)
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in _loop() (was silent pass)", exc_info=True)
             try:
                 _watch_tick()
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in _loop() (was silent pass)", exc_info=True)
             try:
                 windows._wake_clear()
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in _loop() (was silent pass)", exc_info=True)
 
     threading.Thread(target=_loop, daemon=True, name="vision-watcher").start()
 

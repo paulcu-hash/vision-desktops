@@ -3,6 +3,11 @@ import os
 import threading
 from pathlib import Path
 
+import logging
+
+log = logging.getLogger(__name__)
+
+
 LOCK = threading.Lock()
 
 STATE_DIR = Path(os.environ.get("VISION_DESKTOPS_STATE", str(Path.home() / ".vision-desktops")))
@@ -17,7 +22,7 @@ def load_state() -> dict:
             try:
                 return json.loads(STATE_FILE.read_text(encoding="utf-8"))
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("swallowed in load_state() (was silent pass)", exc_info=True)
         return {"desktops": {}}
 
 
@@ -67,7 +72,7 @@ def prune_captures(keep: int = CAPTURE_KEEP) -> int:
             p.unlink()
             n += 1
         except Exception:
-            pass
+            log.debug("swallowed in prune_captures() (was silent pass)", exc_info=True)
     return n
 
 
