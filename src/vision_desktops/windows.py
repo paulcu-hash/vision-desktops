@@ -88,11 +88,27 @@ def class_of(hwnd: int) -> str:
 
 
 def get_title(hwnd: int) -> str:
-    """Window title. Message round-trip bounded to ~100 ms (ABORTIFHUNG
-    returns immediately on hung threads; busy threads cost the bound).
-    Fetch only when the title is needed (delta entries, display) - never
-    speculatively: on a busy system, per-window title stalls add up to
-    seconds of caller-thread stall and starve the re-queue budget."""
+    """Window title - schnell und ohne blockierende Nachricht.
+
+    NORMALFALL (Fenster eines anderen Prozesses, z.B. beim Auflisten von 50
+    Fenstern): GetWindowTextW liest den vom Kernel gehaltenen Titel - kein
+    WM_GETTEXT-Roundtrip an den fremden Thread, kein Warten auf
+    beschaeftigte Fenster. Genau das kostete bisher bis zu 100 ms PRO
+    Fenster (SendMessageTimeout, ABORTIFHUNG) und macht window_list mit
+    vielen Fenstern traege.
+
+    FALL ZURUECK: bleibt der Kernel-Titel leer (Fenster des EIGENEN
+    Prozesses, oder ein Fenster das seinen Titel nicht per WM_SETTEXT
+    fuehrt), wird wie bisher per SendMessageTimeout gefragt - begrenzt auf
+    100 ms, ABORTIFHUNG, nie endlos blockiert."""
+    try:
+        buf = ctypes.create_unicode_buffer(512)
+        if _user32.GetWindowTextW(ctypes.c_void_p(int(hwnd)), buf, 512) > 0 \
+                and buf.value:
+            return buf.value
+    except Exception:  # noqa: BLE001
+        log.debug("swallowed in get_title() (fast path) (was silent pass)",
+                  exc_info=True)
     try:
         _user32.SendMessageTimeoutW.argtypes = [ctypes.c_void_p, wintypes.UINT,
                                                 wintypes.WPARAM, wintypes.LPWSTR,
@@ -692,15 +708,22 @@ def owned_hwnds(owner_hwnd: int) -> list:
 
 
 def owned_windows(owner_hwnd: int) -> list:
-    """Top-level windows owned by owner_hwnd (owner co-move)."""
+    """Top-level windows owned by owner_hwnd (owner co-move), described.
+
+    Der Owner-Vergleich laeuft NUR ueber owned_hwnds() - hwnds ohne
+    Titel-Roundtrip. Erst die Treffer werden beschrieben (Titel/Rect fuer
+    Anzeigen). Vorher wurde jedes Fenster des Systems samt Titel geholt,
+    ausschliesslich um den Owner zu lesen: bei 50 Fenstern war das der
+    gesamte Flaschenhals von window_list."""
     out = []
     try:
-        for w in all_windows(include_tool_windows=True):
+        for h in owned_hwnds(owner_hwnd):
             try:
-                if window_owner(w["hwnd"]) == int(owner_hwnd):
-                    out.append(w["hwnd"])
+                w = _describe(h)
             except Exception:  # noqa: BLE001
                 continue
+            if w is not None:
+                out.append(w)
     except Exception:  # noqa: BLE001
         log.debug("swallowed in owned_windows() (was silent pass)", exc_info=True)
     return out
