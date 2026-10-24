@@ -49,22 +49,62 @@ def save_capture(name: str, png: bytes):
         return None
 
 
+def _load_unlocked() -> dict:
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            log.debug("swallowed in load_state() (was silent pass)", exc_info=True)
+    return {"desktops": {}}
+
+
+def _save_unlocked(st: dict) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, STATE_FILE)
+
+
 def load_state() -> dict:
     with LOCK:
-        if STATE_FILE.exists():
-            try:
-                return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001
-                log.debug("swallowed in load_state() (was silent pass)", exc_info=True)
-        return {"desktops": {}}
+        return _load_unlocked()
 
 
 def save_state(state: dict) -> None:
     with LOCK:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = STATE_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, STATE_FILE)
+        _save_unlocked(state)
+
+
+# --- Offene Hide-Eintraege (Ueberleben eines harten Abbruchs) ---------------
+# atexit (retrieval._restore_all_hidden_at_exit) laeuft bei Task-Manager-Kill
+# oder Absturz NICHT. Ein mit SW_HIDE verstecktes Fenster waere dann fuer
+# immer unsichtbar - Diebstahl durch Unsichtbarkeit. Darum steht jeder
+# unabgeschlossene Hide-Eintrag HIER in state.json, und der Server-Start
+# (retrieval.restore_hidden_at_start) holt sie zurueck.
+
+def add_hidden(hwnd: int, info: dict) -> None:
+    """Einen als versteckt registrierten hwnd festhalten (read-modify-write
+    unter demselben LOCK wie alles andere - kein verlorenes Update)."""
+    with LOCK:
+        st = _load_unlocked()
+        st.setdefault("hidden", {})[str(int(hwnd))] = dict(info)
+        _save_unlocked(st)
+
+
+def drop_hidden(hwnd) -> None:
+    """Eintrag entfernen (Fenster sichtbar, tot oder unabhaengig aufgeloest)."""
+    key = str(int(hwnd))
+    with LOCK:
+        st = _load_unlocked()
+        if key in (st.get("hidden") or {}):
+            del st["hidden"][key]
+            _save_unlocked(st)
+
+
+def hidden_entries() -> dict:
+    """Kopie der offenen Hide-Eintraege {str(hwnd): info}."""
+    with LOCK:
+        return dict(_load_unlocked().get("hidden") or {})
 
 
 def get_desktop(name: str):

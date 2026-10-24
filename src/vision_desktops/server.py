@@ -977,4 +977,10 @@ def main():
     # `diagnose`-Tool im Speicher. Nie stdout (MCP-Transport), optional
     # stderr via VISION_DESKTOPS_LOG=stderr.
     errors.install()
+    # Versteckte Fenster zurueckholen: bei einem harten Kill lief atexit
+    # nicht - offene state.json-Hide-Eintraege sind dann die einzige Spur
+    # (Task-Manager-Kill -> nach dem Neustart wieder sichtbar).
+    stats = retrieval.restore_hidden_at_start()
+    if stats.get("entries"):
+        log.info("restore hidden windows at start: %s", stats)
     mcp.run()

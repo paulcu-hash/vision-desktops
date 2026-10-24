@@ -238,7 +238,20 @@ def _note_hidden(hwnd: int, desktop_id: str, prov: str) -> bool:
             return True
         _HIDDEN_PENDING.add(h)
         _HIDE_STATS["hidden"] += 1
-        return True
+    # HART UEBERLEBEND: Eintrag in state.json, BEVOR das Fenster versteckt
+    # wird. Bei Kill/Absturz laeuft atexit nicht - dieser Eintrag ist dann
+    # die einzige Spur, und der naechste Server-Start holt das Fenster
+    # zurueck (restore_hidden_at_start). Reihenfolge: erst der Eintrag,
+    # dann verstecken - nie umgekehrt (Luecke = fuer immer unsichtbar).
+    try:
+        state.add_hidden(h, {"desktop_id": str(desktop_id),
+                             "since": time.time()})
+    except Exception:  # noqa: BLE001
+        log.debug("swallowed in _note_hidden() (state.add_hidden failed, "
+                  "hide proceeds - hard-kill recovery would be blind)",
+                  exc_info=True)
+    _ensure_hidden_janitor()
+    return True
 
 
 def _resolve_hidden(hwnd: int, show: bool) -> str | None:
@@ -261,6 +274,9 @@ def _resolve_hidden(hwnd: int, show: bool) -> str | None:
             windows.async_show(h)  # visible on target, never blocks decider
         except Exception:  # noqa: BLE001
             log.debug("swallowed in _resolve_hidden() (was silent pass)", exc_info=True)
+        # state-Eintrag bleibt stehen, bis das Fenster sichtbar ist - der
+        # Janitor wirft ihn weg, sobald is_window_visible True meldet
+        # (Reihenfolge egal: sichtbar => nichts mehr zu retten).
         return "moved"
     try:
         alive = windows.is_window(h)
@@ -269,6 +285,7 @@ def _resolve_hidden(hwnd: int, show: bool) -> str | None:
     if not alive:
         with _HIDE_LOCK:
             _HIDE_STATS["gone"] += 1
+        _drop_hidden_entry(h)  # tot -> nichts mehr zu retten
         return "gone"
     try:
         windows.show_window(h)  # caller/watcher thread, never the decider
@@ -278,6 +295,7 @@ def _resolve_hidden(hwnd: int, show: bool) -> str | None:
         if windows.is_window_visible(h):
             with _HIDE_LOCK:
                 _HIDE_STATS["restored"] += 1
+            _drop_hidden_entry(h)  # sichtbar -> aufgeloest
             return "restored"
     except Exception:  # noqa: BLE001
         log.debug("swallowed in _resolve_hidden() (was silent pass)", exc_info=True)
@@ -285,11 +303,14 @@ def _resolve_hidden(hwnd: int, show: bool) -> str | None:
         if not windows.is_window(h):
             with _HIDE_LOCK:
                 _HIDE_STATS["gone"] += 1
+            _drop_hidden_entry(h)
             return "gone"
     except Exception:  # noqa: BLE001
         log.debug("swallowed in _resolve_hidden() (was silent pass)", exc_info=True)
     with _HIDE_LOCK:
         _HIDE_STATS["restore_failed"] += 1
+    # Eintrag BEWUSST stehen lassen: das Fenster ist immer noch unsichtbar,
+    # der naechste Start versucht die Rueckholung erneut.
     return "restore_failed"
 
 
@@ -319,6 +340,97 @@ def _restore_all_hidden_at_exit() -> None:
             _resolve_hidden(h, show=True)
         except Exception:  # noqa: BLE001
             log.debug("swallowed in _restore_all_hidden_at_exit() (was silent pass)", exc_info=True)
+
+
+def _drop_hidden_entry(h: int) -> None:
+    """state.json-Eintrag entfernen - darf den Aufrufer nie kosten."""
+    try:
+        state.drop_hidden(h)
+    except Exception:  # noqa: BLE001
+        log.debug("swallowed in _drop_hidden_entry() (was silent pass)", exc_info=True)
+
+
+HIDDEN_JANITOR_S = 2.0     # Aufraum-Takt
+HIDDEN_GRACE_S = 15.0      # Schonfrist: Eintrag entsteht VOR dem async_hide
+_JANITOR_LOCK = threading.Lock()
+_JANITOR_STARTED = [False]
+
+
+def _hidden_janitor_loop() -> None:
+    """Entfernt Eintraege, die nichts mehr zu retten haben: Fenster sichtbar
+    (Rueckholung ueberfluessig) oder tot. NIE selbst anzeigen - laufendes
+    Verstecken ist Absicht (Bewegung in die Box), zurueckgeholt wird nur
+    beim Start. Die Schutzfrist verhindert, dass der frische Eintrag vor
+    dem greifenden async_hide weggewischt wird."""
+    while True:
+        time.sleep(HIDDEN_JANITOR_S)
+        try:
+            now = time.time()
+            for h_str, info in state.hidden_entries().items():
+                try:
+                    h = int(h_str)
+                    if float(info.get("since", 0) or 0) + HIDDEN_GRACE_S > now:
+                        continue
+                    if (not windows.is_window(h)) or windows.is_window_visible(h):
+                        state.drop_hidden(h)
+                except Exception:  # noqa: BLE001
+                    log.debug("swallowed in _hidden_janitor_loop() (entry) (was silent pass)",
+                              exc_info=True)
+        except Exception:  # noqa: BLE001
+            log.debug("swallowed in _hidden_janitor_loop() (was silent pass)",
+                      exc_info=True)
+
+
+def _ensure_hidden_janitor() -> None:
+    with _JANITOR_LOCK:
+        if _JANITOR_STARTED[0]:
+            return
+        _JANITOR_STARTED[0] = True
+    threading.Thread(target=_hidden_janitor_loop, daemon=True,
+                     name="vision-hidden-janitor").start()
+
+
+def restore_hidden_at_start() -> dict:
+    """Harter Kill (Task-Manager, Absturz): atexit-Recovery lief NICHT.
+    Alle offenen Hide-Eintraege aus state.json hier zurueckholen - der
+    Server-Start ruft das VOR dem Warten auf Anfragen auf.
+
+    Pro Eintrag: tot -> weg; sichtbar -> weg (nur Buchhaltung war offen);
+    versteckt -> show_window + Sichtpruefung. Bleibt es unsichtbar, bleibt
+    der Eintrag stehen (naechster Start versucht es erneut) - nie blind
+    als erledigt buchen."""
+    stats = {"entries": 0, "gone": 0, "already_visible": 0, "shown": 0,
+             "still_hidden": 0}
+    try:
+        entries = state.hidden_entries()
+        _ensure_hidden_janitor()
+    except Exception:  # noqa: BLE001
+        log.debug("swallowed in restore_hidden_at_start() (was silent pass)",
+                  exc_info=True)
+        return stats
+    for h_str in list(entries):
+        stats["entries"] += 1
+        try:
+            h = int(h_str)
+            if not windows.is_window(h):
+                _drop_hidden_entry(h)
+                stats["gone"] += 1
+                continue
+            if windows.is_window_visible(h):
+                _drop_hidden_entry(h)
+                stats["already_visible"] += 1
+                continue
+            windows.show_window(h)
+            if windows.is_window_visible(h):
+                _drop_hidden_entry(h)
+                stats["shown"] += 1
+            else:
+                stats["still_hidden"] += 1  # Eintrag bleibt (Erneutversuch)
+        except Exception:  # noqa: BLE001
+            log.debug("swallowed in restore_hidden_at_start() (entry) "
+                      "(was silent pass)", exc_info=True)
+            stats["still_hidden"] += 1
+    return stats
 
 
 try:
