@@ -238,8 +238,31 @@ def _windows_of(rec: dict) -> list:
         elif w["pid"] in pids and w["hwnd"] not in tracked:
             out.append(w)
     if set(alive) != tracked:
-        rec["hwnds"] = alive
-        state.put_desktop(rec)
+        # ATOMAR: nur als tot NACHGEWIESENE hwnds entfernen (is_window),
+        # nie aus bloessem FehLEN in einem EnumWindows-Durchlauf. Ein
+        # Fenster kann in einem einzigen Durchlauf fehlen (Hop, minimieren,
+        # Uebergang) - als tot gebucht loescht es der Pruner aus dem rec,
+        # und desktop_remove sieht dann kein Ziel mehr (kein Schliessen,
+        # kein Kill). Und nie einen lokalen Snapshot speichern: der waere
+        # zwischen Laden und Speichern veraltet (Lost Update mit dem
+        # Watcher-Thread, der zeitgleich hwnds anhaengt).
+        missing = [int(h) for h in tracked if h not in set(alive)]
+        dead = {h for h in missing if not windows.is_window(h)}
+
+        def _mut(fresh: dict) -> None:
+            kept = [int(h) for h in fresh.get("hwnds", []) if int(h) not in dead]
+            for h in alive:
+                if h not in kept:
+                    kept.append(int(h))
+            fresh["hwnds"] = kept
+
+        updated = state.update_desktop(rec.get("name", ""), _mut)
+        if updated is not None:
+            rec["hwnds"] = list(updated.get("hwnds", []))
+        else:
+            # Unbekannter Name (kein rec): nur lokal nachfuehren, nur
+            # nachgewiesene Tote streichen, nie etwas schreiben.
+            rec["hwnds"] = [int(h) for h in tracked if int(h) not in dead]
     out.sort(key=lambda w: w["area"], reverse=True)
     return out
 
@@ -257,11 +280,28 @@ def _launch_into(rec: dict, exe: str, args: str, wait_seconds: float) -> dict:
     pid = int(res.get("pid", 0))
     # PID-Identitaet: als {pid,ctime} speichern, damit nach Neustart eine
     # recycelte PID nicht als "eigen" gilt (fail-closed, s. live_roots).
-    rec.setdefault("pids", []).append({"pid": pid, "ctime": windows.pid_ctime(pid)})
-    for h in res.get("moved_hwnds", []):
-        if int(h) not in rec.get("hwnds", []):
-            rec.setdefault("hwnds", []).append(int(h))
-    state.put_desktop(rec)
+    ctime = windows.pid_ctime(pid)
+    hwnds = [int(h) for h in res.get("moved_hwnds", [])]
+
+    def _mut(fresh: dict) -> None:
+        # ATOMAR am FRISCHEN rec: der Wacher-Thread (_watch_add_to_rec)
+        # haengt zeitgleich einen hwnd an denselben rec. Beide vorher
+        # gespeicherten ihren eigenen Snapshot - der letzte Schreiber
+        # gewann, und der Eintrag des anderen war WEG (Lost Update: ein
+        # verlorener PID-Eintrag heisst, dass desktop_remove diesen
+        # Prozess nicht beendet).
+        fresh.setdefault("pids", []).append({"pid": pid, "ctime": ctime})
+        hs = fresh.setdefault("hwnds", [])
+        for h in hwnds:
+            if h not in hs:
+                hs.append(h)
+
+    state.update_desktop(rec.get("name", ""), _mut)
+    # Lokalen Snapshot nachfuehren (Aufrufer lesen rec weiter).
+    rec.setdefault("pids", []).append({"pid": pid, "ctime": ctime})
+    for h in hwnds:
+        if h not in rec.get("hwnds", []):
+            rec.setdefault("hwnds", []).append(h)
     result: dict = {"pid": pid, "moved_windows": res.get("moved_windows", []),
                     "moved_hwnds": [int(h) for h in res.get("moved_hwnds", [])],
                     "handoff": bool(res.get("handoff")),
@@ -325,8 +365,11 @@ def desktop_create(name: str, app: str = "", args: str = "", wait_seconds: float
     state.put_desktop(rec)
     result = {"desktop": name, "number": info["number"], "id": info["id"]}
     if app:
+        # _launch_into speichert pid/hwnds selbst ATOMAR am frischen rec
+        # (update_desktop) - hier nichts mehr nachspeichern: ein zweites
+        # put_desktop(rec) wuerde den lokalen Snapshot drueberlegen und
+        # Eintraege des Watcher-Threads verlieren.
         result["launch"] = _launch_into(rec, app, args, wait_seconds)
-        state.put_desktop(rec)
     return _txt(result)
 
 
@@ -424,7 +467,10 @@ def _park_on_graveyard(hwnds: list, drop_approved: set | None = None) -> dict:
         if oldest not in approved:
             closed_undecided.append(oldest)
     grave["hwnds"] = known
-    state.put_desktop(grave)
+    # ATOMAR: frischer grave-rec (Watcher/andere Vorgaenge koennen hwnds
+    # dazwischengespeichert haben) statt des lokalen Snapshots.
+    state.update_desktop(GRAVEYARD, lambda fresh: fresh.__setitem__(
+        "hwnds", list(known)))
     return {"parked": parked, "closed_by_rotation": closed,
             "rotation_closed_undecided": closed_undecided,
             "graveyard_size": len(known)}
@@ -945,8 +991,15 @@ def window_adopt(desktop: str, hwnd: int) -> list:
         except Exception:  # noqa: BLE001
             log.debug("swallowed in window_adopt() (was silent pass)", exc_info=True)
         if h not in rec.get("hwnds", []):
-            rec.setdefault("hwnds", []).append(h)
-            state.put_desktop(rec)
+            # ATOMAR am frischen rec (siehe _windows_of/_launch_into).
+            def _mut(fresh: dict, _h=h) -> None:
+                hwnds = fresh.setdefault("hwnds", [])
+                if _h not in hwnds:
+                    hwnds.append(_h)
+
+            updated = state.update_desktop(desktop, _mut)
+            rec["hwnds"] = list(updated.get("hwnds", [])) \
+                if updated is not None else list(rec.get("hwnds", [])) + [h]
         try:
             state.drop_delta(h)
         except Exception:  # noqa: BLE001

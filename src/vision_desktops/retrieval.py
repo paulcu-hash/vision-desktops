@@ -1096,13 +1096,20 @@ def _watch_add_to_rec(desktop_id: str, hwnd: int) -> None:
                     break
         if not name:
             return
-        try:
-            rec = _state.require_desktop(name)
-        except Exception:  # noqa: BLE001
-            return
-        if int(hwnd) not in rec.get("hwnds", []):
-            rec.setdefault("hwnds", []).append(int(hwnd))
-            _state.put_desktop(rec)
+        # ATOMAR am FRISCHEN rec: vorher wurde ein lokaler Snapshot
+        # (require_desktop) geaendert und komplett gespeichert - der
+        # laufende Launch (_launch_into) speichert dagegen seinen Snapshot
+        # und wuerde diesen hwnd-Eintrag wieder ueberschreiben (verlorenes
+        # Update: das Fenster gehoert dann zu keinem rec mehr).
+        def _mut(fresh: dict, _h=int(hwnd)) -> None:
+            hwnds = fresh.setdefault("hwnds", [])
+            if _h not in hwnds:
+                hwnds.append(_h)
+
+        updated = _state.update_desktop(name, _mut)
+        if updated is None:
+            log.debug("_watch_add_to_rec(): desktop %r vanished before the "
+                      "atomic update", name)
     except Exception:  # noqa: BLE001
         log.debug("swallowed in _watch_add_to_rec() (was silent pass)", exc_info=True)
 
