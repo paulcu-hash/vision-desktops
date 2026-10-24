@@ -67,13 +67,27 @@ def hop_busy() -> bool:
         _kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
         _kernel32.CreateMutexW.restype = ctypes.c_void_p
         _kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+        _kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        _kernel32.ReleaseMutex.argtypes = [ctypes.c_void_p]
         _kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        WAIT_OBJECT_0, WAIT_ABANDONED = 0x0, 0x80
         h = _kernel32.CreateMutexW(None, False, "Local\\VisionDesktopsHop")
         if not h:
             return True
         try:
             r = _kernel32.WaitForSingleObject(h, 0)
-            return r not in (0x0, 0x80)
+            # WICHTIG: WAIT_OBJECT_0 / WAIT_ABANDONED heisst, wir haben den
+            # Mutex JETZT ERWORBEN (entweder war er frei, oder der vorherige
+            # Owner ist abgestuerzt - beide faellen Ownership an uns).
+            # Ein reiner "ist er frei?"-Check darf den Hop-Lock NIEMALS
+            # halten: CloseHandle laesst Ownership stehen, bis dieser Thread
+            # endet. Ohne ReleaseMutex blockiert dann der naechste echte
+            # Hop (_system_lock, 120 s Timeout) bis dahin. Also sofort frei.
+            if r in (WAIT_OBJECT_0, WAIT_ABANDONED):
+                if not _kernel32.ReleaseMutex(h):
+                    log.debug("hop_busy(): ReleaseMutex failed - mutex would "
+                              "stay owned by this thread (blocked hop risk)")
+            return r not in (WAIT_OBJECT_0, WAIT_ABANDONED)
         finally:
             try:
                 _kernel32.CloseHandle(h)
