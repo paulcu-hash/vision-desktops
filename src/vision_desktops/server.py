@@ -155,6 +155,57 @@ def _tool_err(exc: Exception):
     return _err(messages.translate_external_error(str(exc)))
 
 
+def _shot_blocks(desktop: str, target: dict, max_width: int,
+                 embed_image: bool = True, payload: dict | None = None) -> list:
+    """Text-Meta + optionales JPEG eines Fensters - EINE Codebasis fuer
+    `see` und die hop_*-Tools mit see_after.
+
+    `payload` (z.B. das hop-Ergebnis) kommt UNTER die Shot-Meta: so
+    liefert ein einziger Tool-Call Aktion und Ergebnisbild."""
+    data, w, h = capture.grab_client(target["hwnd"])
+    state.CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
+    path = state.CAPTURE_DIR / f"{desktop}-{stamp}.png"
+    path.write_bytes(capture.to_png(data, w, h))
+    state.prune_captures()
+    shot = {"saved_to": str(path), "window_title": target["title"],
+            "hwnd": target["hwnd"], "size_px": [w, h],
+            "image_px": list(capture.fit_width(w, h, max(320, max_width))),
+            "hint": messages.SEE_HINT}
+    meta = {**shot, **(payload or {})}
+    blocks: list = [TextContent(type="text",
+                                text=json.dumps(meta, ensure_ascii=False))]
+    if embed_image:
+        jpeg = capture.to_jpeg(data, w, h, max_width=max(320, max_width))
+        blocks.append(ImageContent(type="image",
+                                   data=base64.b64encode(jpeg).decode("ascii"),
+                                   mimeType="image/jpeg"))
+    return blocks
+
+
+def _hop_out(desktop: str, target: dict, result, see_after: bool,
+             max_width: int) -> list:
+    """Ausgabe eines hop_*-Tools: Ergebnis, bei see_after ZUSAEMTZLICH das
+    Ergebnisbild im SELBEN Call - spart pro Aktion einen LLM-Roundtrip
+    (kein separates `see` mehr noetig).
+
+    Das Bild uebernimmt die Verifikation (_verify_close), genau wie `see`.
+    Schlaegt der Screenshot fehl, bleibt das Hop-Ergebnis als Text erhalten
+    (ein Aktionsergebnis darf nie durch einen Shot verloren gehen)."""
+    _verify_open(desktop)
+    if not see_after:
+        return _txt(result)
+    try:
+        payload = dict(result) if isinstance(result, dict) else {"result": result}
+        blocks = _shot_blocks(desktop, target, max_width, payload=payload)
+        _verify_close(desktop)
+        return blocks
+    except Exception:  # noqa: BLE001
+        log.debug("swallowed in _hop_out() (see_after shot failed, "
+                  "falling back to text)", exc_info=True)
+        return _txt(result)
+
+
 def _resolve(rec: dict, hwnd: int = 0, title_contains: str = "") -> dict:
     wins = _windows_of(rec)
     if not wins:
@@ -543,21 +594,7 @@ def see(desktop: str, hwnd: int = 0, title_contains: str = "",
     try:
         rec = _require_desktop(desktop)
         target = _resolve(rec, hwnd, title_contains or "")
-        data, w, h = capture.grab_client(target["hwnd"])
-        state.CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
-        path = state.CAPTURE_DIR / f"{desktop}-{stamp}.png"
-        path.write_bytes(capture.to_png(data, w, h))
-        state.prune_captures()
-        meta = {"saved_to": str(path), "window_title": target["title"],
-                "hwnd": target["hwnd"], "size_px": [w, h],
-                "image_px": list(capture.fit_width(w, h, max(320, max_width))),
-                "hint": messages.SEE_HINT}
-        blocks: list = [TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
-        if embed_image:
-            jpeg = capture.to_jpeg(data, w, h, max_width=max(320, max_width))
-            blocks.append(ImageContent(type="image", data=base64.b64encode(jpeg).decode("ascii"),
-                                       mimeType="image/jpeg"))
+        blocks = _shot_blocks(desktop, target, max_width, embed_image)
         _verify_close(desktop)
         return blocks
     except Exception as exc:  # noqa: BLE001
@@ -566,7 +603,8 @@ def see(desktop: str, hwnd: int = 0, title_contains: str = "",
 
 @mcp.tool()
 def hop_click(desktop: str, x: int, y: int, hwnd: int = 0, title_contains: str = "",
-              button: str = "left", double: bool = False) -> list:
+              button: str = "left", double: bool = False,
+              see_after: bool = True, max_width: int = 1280) -> list:
     """Hop: jump to the target desktop, click for real, back to main.
 
     Args:
@@ -575,6 +613,9 @@ def hop_click(desktop: str, x: int, y: int, hwnd: int = 0, title_contains: str =
         y: Y pixel from the last `see` screenshot.
         hwnd: Target window (0 = largest), or use title_contains.
         button: 'left' or 'right'. double: double-click.
+        see_after: Return the result screenshot IN THIS CALL (default true,
+            saves one LLM roundtrip). false = text only.
+        max_width: Width of that embedded JPEG.
     """
     try:
         rec = _require_desktop(desktop)
@@ -583,55 +624,62 @@ def hop_click(desktop: str, x: int, y: int, hwnd: int = 0, title_contains: str =
             return _err(messages.BUTTON_ERROR)
         result = hop.do_hop(rec["desktop_id"], target["hwnd"], "click",
                             {"x": int(x), "y": int(y), "button": button, "double": bool(double)})
-        _verify_open(desktop)  # Collision clause: verify step open until see.
-        return _txt(result)
+        return _hop_out(desktop, target, result, bool(see_after), int(max_width))
     except Exception as exc:  # noqa: BLE001
         return _tool_err(exc)
 
 
 @mcp.tool()
-def hop_type(desktop: str, text: str, hwnd: int = 0, title_contains: str = "") -> list:
+def hop_type(desktop: str, text: str, hwnd: int = 0, title_contains: str = "",
+             see_after: bool = True, max_width: int = 1280) -> list:
     """Hop: jump to the target desktop, type real text, back to main.
 
     Args:
         desktop: Target desktop. text: Unicode text (\\n = Enter, \\t = Tab).
+        see_after: Result screenshot in this call (default true).
+        max_width: Width of that embedded JPEG.
     """
     try:
         rec = _require_desktop(desktop)
         target = _resolve(rec, hwnd, title_contains or "")
         result = hop.do_hop(rec["desktop_id"], target["hwnd"], "type", {"text": text})
-        _verify_open(desktop)
-        return _txt(result)
+        return _hop_out(desktop, target, result, bool(see_after), int(max_width))
     except Exception as exc:  # noqa: BLE001
         return _tool_err(exc)
 
 
 @mcp.tool()
-def hop_key(desktop: str, keys: str, hwnd: int = 0, title_contains: str = "") -> list:
+def hop_key(desktop: str, keys: str, hwnd: int = 0, title_contains: str = "",
+            see_after: bool = True, max_width: int = 1280) -> list:
     """Hop: send a key combo on the target desktop, back to main.
 
     Args:
         keys: e.g. 'enter', 'ctrl+s', 'alt+f4', 'ctrl+shift+t'.
+        see_after: Result screenshot in this call (default true).
+        max_width: Width of that embedded JPEG.
     """
     try:
         rec = _require_desktop(desktop)
         target = _resolve(rec, hwnd, title_contains or "")
         result = hop.do_hop(rec["desktop_id"], target["hwnd"], "key", {"keys": keys})
-        _verify_open(desktop)
-        return _txt(result)
+        return _hop_out(desktop, target, result, bool(see_after), int(max_width))
     except Exception as exc:  # noqa: BLE001
         return _tool_err(exc)
 
 
 @mcp.tool()
-def hop_scroll(desktop: str, lines: float = -3, hwnd: int = 0, title_contains: str = "") -> list:
-    """Hop: scroll on the target desktop, back to main (negative = down)."""
+def hop_scroll(desktop: str, lines: float = -3, hwnd: int = 0, title_contains: str = "",
+               see_after: bool = True, max_width: int = 1280) -> list:
+    """Hop: scroll on the target desktop, back to main (negative = down).
+
+    see_after: Result screenshot in this call (default true).
+    max_width: Width of that embedded JPEG.
+    """
     try:
         rec = _require_desktop(desktop)
         target = _resolve(rec, hwnd, title_contains or "")
         result = hop.do_hop(rec["desktop_id"], target["hwnd"], "scroll", {"lines": float(lines)})
-        _verify_open(desktop)
-        return _txt(result)
+        return _hop_out(desktop, target, result, bool(see_after), int(max_width))
     except Exception as exc:  # noqa: BLE001
         return _tool_err(exc)
 

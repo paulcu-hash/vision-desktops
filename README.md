@@ -38,7 +38,7 @@ remember main -> target desktop -> click/type -> back on main -> next ...
 | `app_launch` | Launch any exe on the target desktop + event-driven retrieval (proven ownership only) |
 | `window_list` | Windows of a desktop (hwnd, title, class) |
 | `see` | Screenshot (parallel), inline JPEG + PNG file. Sole basis for decisions |
-| `hop_click` / `hop_type` / `hop_key` / `hop_scroll` | Hopping: there -> real input -> back on main (lock-serialized) |
+| `hop_click` / `hop_type` / `hop_key` / `hop_scroll` | Hopping: there -> real input -> back on main (lock-serialized). `see_after` (default true) returns the result screenshot in the SAME call - no extra `see` roundtrip; `see_after=false` = text only |
 | `desktop_see` / `desktop_click` / `desktop_type` / `desktop_key` / `desktop_scroll` | Desktop level for system UI without an app window (Start/Run/Tray). Refuses Main hard |
 | `delta_list` / `delta_view` / `window_adopt` | Main delta without pixels (hwnd/PID/title/time+reason), targeted single view without retention, explicit adoption by vision verdict |
 | `show_main` | Emergency: back to desktop #1 |
