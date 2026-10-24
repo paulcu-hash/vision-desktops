@@ -149,6 +149,14 @@ Then restart the agent. Example prompt:
 > Create 2 desktops (research, build). Launch Notepad on each.
 > Take turns: see -> hop_type -> verify via see. Clean up everything at the end.
 
+## Environment (opt-in, all optional)
+
+| Variable | Effect |
+|---|---|
+| `VISION_DESKTOPS_SAVE_CAPTURES=1` | `see` / `desktop_see` additionally write the full PNG into `~/.vision-desktops/captures` (kept: 200). **Default off** - no file, no `saved_to`, the folder stays empty; the embedded JPEG is what the agent sees anyway |
+| `VISION_DESKTOPS_LOG=stderr` | Log swallowed errors (tracebacks) to stderr. **Never stdout** - stdout is the MCP transport |
+| `VISION_DESKTOPS_STATE=<dir>` | State directory (default `~/.vision-desktops`) |
+
 ## Manual operation via harness (no agent)
 
 `tests/harness.py` calls individual tools directly. Important in PowerShell:

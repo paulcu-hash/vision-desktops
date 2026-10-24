@@ -163,15 +163,18 @@ def _shot_blocks(desktop: str, target: dict, max_width: int,
     `payload` (z.B. das hop-Ergebnis) kommt UNTER die Shot-Meta: so
     liefert ein einziger Tool-Call Aktion und Ergebnisbild."""
     data, w, h = capture.grab_client(target["hwnd"])
-    state.CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
-    path = state.CAPTURE_DIR / f"{desktop}-{stamp}.png"
-    path.write_bytes(capture.to_png(data, w, h))
-    state.prune_captures()
-    shot = {"saved_to": str(path), "window_title": target["title"],
+    # PNG nur auf Wunsch (VISION_DESKTOPS_SAVE_CAPTURES): sonst kein File,
+    # kein saved_to - das JPEG in der Antwort ist ohnehin das, was der
+    # Agent sieht. Default: der captures-Ordner bleibt leer.
+    path = state.save_capture(f"{desktop}-{stamp}.png",
+                              capture.to_png(data, w, h))
+    shot = {"window_title": target["title"],
             "hwnd": target["hwnd"], "size_px": [w, h],
             "image_px": list(capture.fit_width(w, h, max(320, max_width))),
             "hint": messages.SEE_HINT}
+    if path:
+        shot["saved_to"] = str(path)
     meta = {**shot, **(payload or {})}
     blocks: list = [TextContent(type="text",
                                 text=json.dumps(meta, ensure_ascii=False))]
@@ -712,15 +715,16 @@ def desktop_see(desktop: str, max_width: int = 1280, embed_image: bool = True) -
             data, w, h, ox, oy = capture.grab_screen()
         # Offline after session exit (after show_main + cursor restore):
         # JPEG/PNG encode + file write no longer hold the hop lock.
-        state.CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
-        path = state.CAPTURE_DIR / f"{desktop}-desk-{stamp}.png"
-        path.write_bytes(capture.to_png(data, w, h))
-        state.prune_captures()
-        meta = {"saved_to": str(path), "desktop": desktop,
+        # PNG nur auf Wunsch (VISION_DESKTOPS_SAVE_CAPTURES), s. state.py.
+        path = state.save_capture(f"{desktop}-desk-{stamp}.png",
+                                  capture.to_png(data, w, h))
+        meta = {"desktop": desktop,
                 "size_px": [w, h], "origin_px": [ox, oy],
                 "image_px": list(capture.fit_width(w, h, max(320, max_width))),
                 "hint": messages.DESKTOP_SEE_HINT}
+        if path:
+            meta["saved_to"] = str(path)
         blocks: list = [TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
         if embed_image:
             jpeg = capture.to_jpeg(data, w, h, max_width=max(320, max_width))

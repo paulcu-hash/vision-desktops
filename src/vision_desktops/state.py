@@ -15,6 +15,39 @@ STATE_FILE = STATE_DIR / "state.json"
 CAPTURE_DIR = STATE_DIR / "captures"
 CAPTURE_KEEP = 200
 
+CAPTURES_ENV = "VISION_DESKTOPS_SAVE_CAPTURES"
+_CAPTURES_OFF = ("", "0", "false", "no", "off", "nein", "aus")
+
+
+def captures_enabled() -> bool:
+    """Screenshots auf Platte - nur auf Wunsch (Default: AUS).
+
+    Jedes see/desktop_see erzeugt sonst ein Voll-PNG: bis zu 200 Dateien,
+    unverschluesselt, in ~/.vision-desktops/captures. Das Speichern kostet
+    Prozessorzeit (PNG) und bleibt unnoetig, wenn das Bild ohnehin nur als
+    JPEG in der Antwort untergeht. VISION_DESKTOPS_SAVE_CAPTURES=1 (oder
+    ein beliebiger anderer Wert ausser 0/false/off) aktiviert es."""
+    return str(os.environ.get(CAPTURES_ENV, "")).strip().lower() \
+        not in _CAPTURES_OFF
+
+
+def save_capture(name: str, png: bytes):
+    """PNG nach captures/ legen - nur wenn aktiviert, sonst None.
+
+    Ein gescheiterter Speichervollzug ist KEIN Tool-Fehler: das Bild ist ja
+    bereits in der Antwort, es fehlt nur die Datei."""
+    if not captures_enabled():
+        return None
+    try:
+        CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+        path = CAPTURE_DIR / name
+        path.write_bytes(png)
+        prune_captures()
+        return path
+    except Exception:  # noqa: BLE001
+        log.debug("swallowed in save_capture() (was silent pass)", exc_info=True)
+        return None
+
 
 def load_state() -> dict:
     with LOCK:
