@@ -37,46 +37,23 @@ log = logging.getLogger(__name__)
 mcp = FastMCP(
     "vision-desktops",
     instructions=(
-        "Parallel vision-based computer use on Windows virtual desktops. "
-        "The main agent runs on the visible main desktop and orchestrates "
-        "any number of background desktops (Win+Tab level via pyvda, NOT "
-        "CreateDesktop). Every action is 100% vision: coordinates always "
-        "come from the latest `see` screenshot of the same window. "
-        "Screenshots run in parallel; inputs hop serially: the server "
-        "switches to the target desktop, performs REAL mouse/keyboard "
-        "input, and returns to main - cursor restored. "
-        "Loop per desktop: see -> decide -> hop_click/hop_type/hop_key/hop_scroll "
-        "-> repeat. Interleave desktops for parallelism. Generic for ANY "
-        "window program: locate windows only via hwnd/title_contains, "
-        "never assume app layout. "
-        "Second stage for OS chrome without app windows (Start menu, Run "
-        "dialog, tray): desktop_see -> decide -> "
-        "desktop_click/desktop_type/desktop_key/desktop_scroll -> repeat. Same vision rule "
-        "(fullscreen pixels are the only basis), same real-input path, no "
-        "window handle needed. desktop_* REFUSES the main/host desktop by "
-        "hard assertion - worker desktops only. "
-        "UAC/Secure-Desktop prompts are unreachable by OS design, not a bug."
-        "Removal protocol (no silent close): never call desktop_remove blind. "
-        "First window_list -> see (dirty? dialog? needed later?) and judge per "
-        "window: save via hop_*, park on graveyard, or approve drop via "
-        "decisions={hwnd: 'drop'|'park'|'save'}. Without verdict only parked, "
-        "never deleted; removed:true alone never means content was clean. "
-        "Single-instance apps (browsers, Electron, modern Store apps) hand "
-        "new windows over to an already running process: those windows belong "
-        "to a foreign process and launch reports handoff:true. For real "
-        "isolation, start such apps with a separate data/profile directory "
-        "per desktop if they support it (e.g. browsers take a separate "
-        "user-data directory per desktop, plus a separate remote-debugging "
-        "port per desktop for CDP). "
-        "Event-driven retrieval (v2): auto-move only with proven ownership "
-        "(job hit or process tree). Foreign-host candidates always go to "
-        "delta (hwnd/pid/title/time only, no Main screenshot) and stay on "
-        "Main until explicit adoption. New guards: interaction guard (no "
-        "move when user-touched) and collision clause (queue moves during "
-        "see->hop sessions until rest, 2s cap then delta). Adoption is an "
-        "explicit agent step: delta_list -> delta_view (single on-demand "
-        "view, no retention) -> window_adopt (vision verdict, pin and "
-        "user-touched guards still apply). Pinned windows/apps never move."
+        "Parallel vision-based computer use on Windows virtual desktops: "
+        "the agent stays on the visible main desktop and orchestrates any "
+        "number of worker desktops (Win+Tab level). Every decision comes "
+        "from screenshots; inputs are REAL mouse/keyboard events on the "
+        "target desktop (cursor restored). "
+        "Window loop: see -> hop_click/hop_type/hop_key/hop_scroll -> see. "
+        "Interleave desktops for parallelism. "
+        "System UI loop (Start/Run/Tray): desktop_see -> "
+        "desktop_click/desktop_type/desktop_key/desktop_scroll -> "
+        "desktop_see; desktop_* refuses Main hard. "
+        "100% vision: coordinates always come from the latest screenshot "
+        "of the same window/level; locate windows only via "
+        "hwnd/title_contains, never assume app layout. "
+        "desktop_remove needs a window_list -> see verdict first (never "
+        "blind). UAC prompts are unreachable by OS design. "
+        "Call help for the full protocol (loops, removal, handoff, "
+        "retrieval v2, adoption)."
     ),
 )
 
@@ -419,6 +396,16 @@ def _launch_into(rec: dict, exe: str, args: str, wait_seconds: float) -> dict:
         note = messages.NO_PROVEN_OWNERSHIP_NOTE
     result["note"] = note
     return result
+
+
+@mcp.tool()
+def help() -> list:
+    """Full protocol text: loops (window/desktop), 100% vision rule,
+    removal verdicts, single-instance handoff + isolation, retrieval v2,
+    adoption, limits. The server instructions carry only the short core -
+    call this when the details matter (costs one call, saves token budget
+    on every session start)."""
+    return _txt(messages.HELP_TEXT)
 
 
 @mcp.tool()

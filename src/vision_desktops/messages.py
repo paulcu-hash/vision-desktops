@@ -143,6 +143,60 @@ DELTA_VIEW_HINT = (
     "(window_adopt only moves)."
 )
 
+# --- help-Tool (Punkt 14: vollstaendiger Protokolltext, aus den
+# Server-Instructions herausgeloesst - dort bleibt nur der Kern) ---
+
+HELP_TEXT = """vision-desktops - full protocol
+
+LOOP, window level (any window program):
+  window_list -> see -> decide -> hop_click/hop_type/hop_key/hop_scroll
+  -> see (verify). Screenshots run in parallel across desktops; inputs
+  hop serially (the server switches to the target desktop, performs REAL
+  mouse/keyboard input, returns to main, cursor restored). Interleave
+  desktops for parallelism. see spares tokens: an unchanged window
+  answers text only (previous screenshot still valid); region='x,y,w,h'
+  captures a crop, max_width=640 a compact image. hop_* return the result
+  screenshot in the SAME call (see_after, default true) - no extra see.
+
+LOOP, desktop level (OS chrome without an app window: Start menu, Run
+  dialog, tray): desktop_see -> desktop_click/desktop_type/desktop_key/
+  desktop_scroll -> desktop_see. Same vision rule (fullscreen pixels are
+  the only basis, scale via size_px/image_px), same real-input path, no
+  window handle needed. desktop_* REFUSES the main/host desktop by hard
+  assertion - worker desktops only.
+
+VISION RULE (100%): coordinates always come from the latest screenshot
+  of the SAME window/level. Generic for ANY program: locate windows only
+  via hwnd/title_contains, never assume app layout.
+
+REMOVAL (no silent close): never call desktop_remove blind. First
+  window_list -> see (dirty? dialog? needed later?) and judge per window:
+  save via hop_*, park on graveyard, or approve drop via
+  decisions={hwnd: 'drop'|'park'|'save'}. Without a verdict windows are
+  only parked, never deleted; removed:true alone never means content was
+  clean.
+
+SINGLE-INSTANCE APPS (browsers, Electron, modern Store apps) hand new
+  windows over to an already running process: those windows belong to a
+  foreign process and launch reports handoff:true. For real isolation,
+  start such apps with a separate data/profile directory per desktop if
+  they support it (e.g. browsers take a separate user-data directory per
+  desktop, plus a separate remote-debugging port per desktop for CDP).
+
+RETRIEVAL v2 (event-driven): auto-move only with proven ownership (job
+  hit or process tree). Foreign-host candidates always go to the delta
+  (hwnd/pid/title/time only, no Main screenshot) and stay on Main until
+  explicit adoption. Guards: interaction guard (no move when
+  user-touched) and collision clause (queue moves during see->hop
+  sessions until rest, 2s cap then delta).
+
+ADOPTION is an explicit agent step: delta_list -> delta_view (single
+  on-demand view, no retention) -> window_adopt (vision verdict; pin and
+  user-touched guards still apply). Pinned windows/apps never move.
+
+LIMIT: UAC and other Secure-Desktop prompts are unreachable from virtual
+  desktops by OS design - not a bug."""
+
 # --- Removal protocol hints ---
 
 NEEDS_AGENT_VISION_UNMOVABLE_HINT = (
