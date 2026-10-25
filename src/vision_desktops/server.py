@@ -17,6 +17,7 @@ Screenshots run in parallel, inputs hop serialized:
 
 import base64
 import json
+import os
 import re
 import time
 from datetime import datetime
@@ -329,6 +330,44 @@ def _windows_of(rec: dict) -> list:
     return out
 
 
+def _norm_app(name: str) -> str:
+    """Programmname fuer den Allowlist-Vergleich: klein, ohne .exe."""
+    return str(name).strip().strip('"').lower().removesuffix(".exe")
+
+
+def _check_launch_allowed(exe: str) -> None:
+    """Allowlist fuer app_launch/desktop_create (Prompt-Injection-Schutz).
+
+    Die Argumente `exe`/`app` stammen aus der Modell-Ausgabe - und deren
+    Inhalt kann von eingeschleustem Text beeinflusst sein (Webseite, Datei,
+    Bildschirmtext). Ohne Pruefung wuerde so ein Text beliebiges Programm
+    starten. Zwei Regeln:
+
+    1. NUR Programme der Allowlist (messages.ALLOWED_APPS, erweiterbar ueber
+       messages.ALLOWED_APPS_ENV - ausschliesslich ueber Environment des
+       Operators, nie ueber Tool-Argumente).
+    2. EXE UNTER Downloads/Temp startet nie (SECURITY_TODO 2): dort kann
+       jeder eine Kopie ablegen - auch unter erlaubtem Namen wie
+       notepad.exe. Verglichen wird das Pfadsegment, nicht der Name.
+
+    Vor allen Seiteneffekten aufrufen: eine Ablehnung darf weder einen
+    Desktop anlegen noch einen Prozess starten."""
+    raw = str(exe or "").strip().strip('"')
+    if not raw:
+        _err(messages.APP_EMPTY_ERROR)
+    parts = raw.replace("/", "\\").split("\\")
+    segments = [p.strip().lower() for p in parts[:-1]]
+    for folder in messages.DENIED_LAUNCH_DIRS:
+        if folder in segments:
+            _err(messages.app_from_denied_dir(raw, folder))
+    allowed = {_norm_app(a) for a in messages.ALLOWED_APPS}
+    extra = os.environ.get(messages.ALLOWED_APPS_ENV, "")
+    allowed |= {_norm_app(a) for a in extra.split(",") if a.strip()}
+    if not parts[-1].strip() or _norm_app(parts[-1]) not in allowed:
+        _err(messages.app_not_allowed(raw,
+                                      sorted(f"{a}.exe" for a in allowed)))
+
+
 def _launch_into(rec: dict, exe: str, args: str, wait_seconds: float) -> dict:
     """Event-driven retrieval (v2): suspended start with a job, auto-move only
     with proven ownership (job/tree). Foreign-host candidates go to delta and
@@ -419,12 +458,18 @@ def desktop_create(name: str, app: str = "", args: str = "", wait_seconds: float
 
     Args:
         name: Short ID (letters, digits, -, _). 'graveyard' is reserved.
-        app: Optional program to start immediately (generic: any exe).
+        app: Optional program to start immediately - allowlisted programs
+            only (prompt-injection guard; a program outside the list is
+            refused BEFORE the desktop is created, nothing is left behind).
         args: Command-line arguments for it.
         wait_seconds: Launch window (max 5 s + 0.5 s rest; larger values
             are reported as wait_capped, late windows are picked up by the
             watcher at any time).
     """
+    # Allowlist-Check als ERSTES: eine Ablehnung darf keinen Desktop
+    # anlegen (sonst bliebe ein leerer Rest-Desktop stehen).
+    if app:
+        _check_launch_allowed(app)
     if not NAME_RE.match(name):
         return _err(messages.NAME_PATTERN_ERROR)
     if name == GRAVEYARD:
@@ -674,7 +719,13 @@ def desktop_remove(desktop: str, kill_apps: bool = True, decisions: dict | None 
 
 @mcp.tool()
 def app_launch(desktop: str, exe: str, args: str = "", wait_seconds: float = 20) -> list:
-    """Start any program on a background desktop.
+    """Start an allowlisted program on a background desktop.
+
+    Allowlist (prompt-injection guard): only programs on the server's
+    allowlist start - a program outside it is refused with a message that
+    lists the allowed names (operators extend it via the
+    VISION_DESKTOPS_ALLOWED_APPS environment variable, never via tool
+    arguments); executables under Downloads/Temp are always refused.
 
     Generic: no app assumptions. Windows with proven ownership (job/tree)
     are automatically brought to the target desktop (launch window max 5 s,
@@ -685,6 +736,7 @@ def app_launch(desktop: str, exe: str, args: str = "", wait_seconds: float = 20)
     supports it).
     """
     try:
+        _check_launch_allowed(exe)
         rec = _require_desktop(desktop)
         return _txt(_launch_into(rec, exe, args, wait_seconds))
     except Exception as exc:  # noqa: BLE001

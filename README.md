@@ -34,8 +34,8 @@ remember main -> target desktop -> click/type -> back on main -> next ...
 
 | Tool | What |
 |---|---|
-| `desktop_create` / `desktop_list` / `desktop_remove` | Background desktops (pyvda). Remove parks survivors on graveyard, never on Main |
-| `app_launch` | Launch any exe on the target desktop + event-driven retrieval (proven ownership only) |
+| `desktop_create` / `desktop_list` / `desktop_remove` | Background desktops (pyvda). Remove parks survivors on graveyard, never on Main. `app=` starts only allowlisted programs (refused before the desktop is created) |
+| `app_launch` | Launch an allowlisted exe on the target desktop + event-driven retrieval (proven ownership only). Outside the allowlist: clear refusal; Downloads/Temp executables always refused |
 | `window_list` | Windows of a desktop (hwnd, pid, title - deliberately no class/rect, answers stay small) |
 | `see` | Screenshot (parallel), inline JPEG. Sole basis for decisions. Sparse: unchanged windows answer text only (no image bytes), `region='x,y,w,h'` captures just that crop, `max_width=640` for a compact image (PNG file only with `VISION_DESKTOPS_SAVE_CAPTURES`) |
 | `hop_click` / `hop_type` / `hop_key` / `hop_scroll` | Hopping: there -> real input -> back on main (lock-serialized). `see_after` (default true) returns the result screenshot in the SAME call - no extra `see` roundtrip; `see_after=false` = text only |
@@ -157,6 +157,7 @@ Then restart the agent. Example prompt:
 | `VISION_DESKTOPS_SAVE_CAPTURES=1` | `see` / `desktop_see` additionally write the full PNG into `~/.vision-desktops/captures` (kept: 200). **Default off** - no file, no `saved_to`, the folder stays empty; the embedded JPEG is what the agent sees anyway |
 | `VISION_DESKTOPS_LOG=stderr` | Log swallowed errors (tracebacks) to stderr. **Never stdout** - stdout is the MCP transport |
 | `VISION_DESKTOPS_STATE=<dir>` | State directory (default `~/.vision-desktops`) |
+| `VISION_DESKTOPS_ALLOWED_APPS=a.exe,b.exe` | Extend the launch allowlist for `app_launch` / `desktop_create` (comma-separated, operator-side environment only - the model cannot change it) |
 
 ## Manual operation via harness (no agent)
 
@@ -174,8 +175,9 @@ Set-Content "$env:TEMP\args.json" '{"desktop": "w1"}'
 ## Status
 
 Research intermediate step: the main agent parallelizes tasks across desktops.
-Later: one agent per desktop. Release hardening (approvals, allowlist,
-sandbox) follows - see `SECURITY_TODO.md`. **Do not release until then.**
+Later: one agent per desktop. Release hardening (agent approvals, sandbox)
+follows - the launch allowlist for `app_launch`/`desktop_create` is in place,
+the rest is listed in `SECURITY_TODO.md`. **Do not release until then.**
 
 ## Verified (self-test green, re-verified 19/10/2026 with the v2 move chain)
 

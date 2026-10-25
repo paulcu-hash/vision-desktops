@@ -22,6 +22,68 @@ MAIN_REFUSED = (
     "worker desktops (#2-N) - the visible screen is never touched."
 )
 
+# --- Programmstart-Allowlist (Prompt-Injection-Schutz fuer
+# app_launch/desktop_create) -----------------------------------------------
+#
+# Tool-Argumente stammen aus der Modell-Ausgabe - und deren Inhalt kann von
+# eingeschleustem Text (Webseite, Datei, Screenshot-Text) beeinflusst sein.
+# Ohne diese Liste wuerde ein eingeschleusterter Satz beliebiges Programm
+# starten. Nur hier genannte Programme duerfen ueber die Launch-Tools starten.
+#
+# Die Liste ist bewusst "Basis-Programme, keine Shell/kein Skript-Host":
+# cmd, powershell, wscript, mshta, rundll32, regsvr32, certutil & Co.
+# fehlen absichtlich. python/pythonw bleiben enthalten, damit eigene
+# Testfenster und Skripte startbar bleiben - ein Interpreter bleibt damit
+# moeglich; die harte Kante ist der Agent-seitige Approval (SECURITY_TODO 1),
+# nicht diese Liste.
+#
+# Operator-Erweiterung NUR ueber Environment (Modell kann das nicht setzen):
+#   VISION_DESKTOPS_ALLOWED_APPS="meinexe.exe,anderes.exe"
+ALLOWED_APPS = (
+    "calc.exe",
+    "charmap.exe",
+    "chrome.exe",
+    "code.exe",
+    "explorer.exe",
+    "firefox.exe",
+    "msedge.exe",
+    "mspaint.exe",
+    "notepad.exe",
+    "python.exe",
+    "pythonw.exe",
+)
+
+ALLOWED_APPS_ENV = "VISION_DESKTOPS_ALLOWED_APPS"
+
+# Aus diesen Ordnern startet NIE etwas (SECURITY_TODO 2): dort kann jeder
+# eine kopierte exe ablegen - auch unter erlaubtem Namen. Pfadsegment-
+# Vergleich, nicht Namensvergleich.
+DENIED_LAUNCH_DIRS = ("downloads", "temp")
+
+APP_EMPTY_ERROR = "app/exe is empty - nothing to launch."
+
+
+def app_not_allowed(exe: str, allowed: list) -> str:
+    """Clear refusal for a program outside the launch allowlist."""
+    return (
+        f"Program '{exe}' is not on the launch allowlist - refused "
+        "(prompt-injection guard for app_launch/desktop_create: tool "
+        "arguments are model output, not operator intent). "
+        f"Allowed: {', '.join(allowed)}. "
+        f"Operators extend the list via {ALLOWED_APPS_ENV} "
+        "(comma-separated, environment only - never via tool arguments)."
+    )
+
+
+def app_from_denied_dir(exe: str, folder: str) -> str:
+    """Refusal for executables living in Downloads/Temp."""
+    return (
+        f"Program '{exe}' points into a '{folder}' folder - refused. "
+        "Executables from Downloads/Temp are never started (anyone can "
+        "drop a copy there, even under an allowlisted name); move it "
+        "elsewhere and add its name to the allowlist."
+    )
+
 
 def desktop_exists(name: str) -> str:
     """Error when a desktop name is already taken."""
@@ -193,6 +255,13 @@ RETRIEVAL v2 (event-driven): auto-move only with proven ownership (job
 ADOPTION is an explicit agent step: delta_list -> delta_view (single
   on-demand view, no retention) -> window_adopt (vision verdict; pin and
   user-touched guards still apply). Pinned windows/apps never move.
+
+LAUNCH ALLOWLIST (prompt-injection guard): app_launch and desktop_create
+  only start programs on the server allowlist; a refusal names the
+  allowed ones (operators extend via VISION_DESKTOPS_ALLOWED_APPS in the
+  environment, never through tool arguments). Executables under
+  Downloads/Temp are always refused. desktop_create refuses BEFORE the
+  desktop exists - no leftover desktop.
 
 LIMIT: UAC and other Secure-Desktop prompts are unreachable from virtual
   desktops by OS design - not a bug."""
