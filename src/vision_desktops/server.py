@@ -155,24 +155,101 @@ def _tool_err(exc: Exception):
     return _err(messages.translate_external_error(str(exc)))
 
 
+# Zuletzt AUSGELIEFERTES Bild pro (desktop, hwnd, region, max_width) - die
+# Grundlage der "unverändert"-Erkennung: ist das Fenster pixel-identisch
+# zum zuletzt gezeigten Bild, spart `see` das zweite Encode und die
+# Bild-Antwort-Bytes (nur Text). Nur Bilder, die wirklich in einer Antwort
+# waren, landen hier (nie spekulativ). FIFO-Begrenzung gegen Speicherwuchs.
+_SHOT_CACHE: dict = {}
+_SHOT_CACHE_ORDER: list = []
+_SHOT_CACHE_MAX = 16
+
+
+def _parse_region(region: str):
+    """'x,y,w,h' in Client-Pikseln -> (x, y, w, h) oder None (keine Angabe).
+
+    Klare Meldung statt stille Missachtung: ein falscher Ausschnitt duerfte
+    nicht plötzlich ein Bild des ganzen Fensters liefern - Koordinaten aus
+    einem verkleinerten Bild duerfen nie auf einen groesseren Ausschnitt
+    angewandt werden (Verwechslungsgefahr)."""
+    if not region:
+        return None
+    parts = [p.strip() for p in str(region).split(",")]
+    if len(parts) != 4:
+        raise RuntimeError(messages.REGION_ERROR)
+    try:
+        x, y, w, h = (int(p) for p in parts)
+    except ValueError:
+        raise RuntimeError(messages.REGION_ERROR) from None
+    if w <= 0 or h <= 0:
+        raise RuntimeError(messages.REGION_ERROR)
+    return (x, y, w, h)
+
+
+def _shot_cache_get(key: tuple):
+    return _SHOT_CACHE.get(key)
+
+
+def _shot_cache_put(key: tuple, data: bytes, w: int, h: int) -> None:
+    _SHOT_CACHE[key] = (data, w, h)
+    _SHOT_CACHE_ORDER.append(key)
+    while len(_SHOT_CACHE_ORDER) > _SHOT_CACHE_MAX:
+        old = _SHOT_CACHE_ORDER.pop(0)
+        if old != key:
+            _SHOT_CACHE.pop(old, None)
+
+
 def _shot_blocks(desktop: str, target: dict, max_width: int,
-                 embed_image: bool = True, payload: dict | None = None) -> list:
+                 embed_image: bool = True, payload: dict | None = None,
+                 region: str = "", unchanged_text: bool = False) -> list:
     """Text-Meta + optionales JPEG eines Fensters - EINE Codebasis fuer
     `see` und die hop_*-Tools mit see_after.
+
+    Sparsam (Punkt 13):
+    - NUR EIN Encode: das PNG wird nur noch kodiert, wenn auch gespeichert
+      wird (VISION_DESKTOPS_SAVE_CAPTURES) - vorher lief der PNG-Encode bei
+      JEDEM see und wurde verworfen.
+    - `region='x,y,w,h'`: nur den Ausschnitt kohieren - kleineres Encode,
+      weniger Antwort-Bytes (Koordinaten bleiben Client-Piksel).
+    - `unchanged_text` (see): pixel-identisch zum zuletzt gezeigten Bild
+      -> NUR Text ("unchanged"), kein zweites Encode, keine Bild-Bytes.
 
     `payload` (z.B. das hop-Ergebnis) kommt UNTER die Shot-Meta: so
     liefert ein einziger Tool-Call Aktion und Ergebnisbild."""
     data, w, h = capture.grab_client(target["hwnd"])
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
-    # PNG nur auf Wunsch (VISION_DESKTOPS_SAVE_CAPTURES): sonst kein File,
-    # kein saved_to - das JPEG in der Antwort ist ohnehin das, was der
-    # Agent sieht. Default: der captures-Ordner bleibt leer.
-    path = state.save_capture(f"{desktop}-{stamp}.png",
-                              capture.to_png(data, w, h))
+    crop = _parse_region(region)
+    if crop:
+        data, w, h = capture.crop_bgra(data, w, h, crop)
     shot = {"window_title": target["title"],
             "hwnd": target["hwnd"], "size_px": [w, h],
             "image_px": list(capture.fit_width(w, h, max(320, max_width))),
             "hint": messages.SEE_HINT}
+    if crop:
+        shot["region_px"] = list(crop)
+
+    # Unverändert? Erst pruefen, dann kodieren - sonst waere der Encode
+    # schon bezahlt, bevor die Antwort ihn einspart. Bei Grössenmismatch
+    # liefert pixel_diff None = geaendert (nie raten).
+    key = (desktop, int(target["hwnd"]), str(region or ""), int(max_width))
+    if unchanged_text and embed_image:
+        prev = _shot_cache_get(key)
+        if prev and prev[1] == w and prev[2] == h:
+            diff = capture.pixel_diff(prev[0], data, w, h)
+            if diff == 0:
+                meta = {**shot, "unchanged": True,
+                        "hint": messages.SEE_UNCHANGED_HINT}
+                return [TextContent(type="text",
+                                    text=json.dumps(meta, ensure_ascii=False))]
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
+    # PNG nur WENN auch gespeichert wird (VISION_DESKTOPS_SAVE_CAPTURES):
+    # save_capture() wuerde bei Default zwar ablehnen, das PNG waere aber
+    # schon kodiert - genau der vermeidbare zweite Encode. Sonst kein File,
+    # kein saved_to - das JPEG in der Antwort ist das, was der Agent sieht.
+    path = None
+    if state.captures_enabled():
+        path = state.save_capture(f"{desktop}-{stamp}.png",
+                                  capture.to_png(data, w, h))
     if path:
         shot["saved_to"] = str(path)
     meta = {**shot, **(payload or {})}
@@ -183,6 +260,9 @@ def _shot_blocks(desktop: str, target: dict, max_width: int,
         blocks.append(ImageContent(type="image",
                                    data=base64.b64encode(jpeg).decode("ascii"),
                                    mimeType="image/jpeg"))
+        # Nur ausgelieferte Bilder duerfen spaeter "unchanged" ausloesen -
+        # der Agent hat sie ja wirklich gesehen.
+        _shot_cache_put(key, data, w, h)
     return blocks
 
 
@@ -633,17 +713,24 @@ def window_list(desktop: str) -> list:
 
 @mcp.tool()
 def see(desktop: str, hwnd: int = 0, title_contains: str = "",
-        max_width: int = 1280, embed_image: bool = True) -> list:
+        max_width: int = 1280, embed_image: bool = True,
+        region: str = "") -> list:
     """Screenshot of a background window (100% vision).
 
     Callable in parallel for any number of desktops. The returned screenshot
     is the only basis for decisions: read click coordinates from exactly
     this image and pass them to hop_click/hop_type.
+
+    Sparsam: unchanged windows return text only (the previous screenshot is
+    still valid - no image bytes). region='x,y,w,h' (client px) captures
+    just that crop (smaller/faster image). max_width=640 for a compact
+    image; coordinates then scale via size_px/image_px (see hint).
     """
     try:
         rec = _require_desktop(desktop)
         target = _resolve(rec, hwnd, title_contains or "")
-        blocks = _shot_blocks(desktop, target, max_width, embed_image)
+        blocks = _shot_blocks(desktop, target, max_width, embed_image,
+                              region=region, unchanged_text=bool(embed_image))
         _verify_close(desktop)
         return blocks
     except Exception as exc:  # noqa: BLE001
@@ -762,9 +849,13 @@ def desktop_see(desktop: str, max_width: int = 1280, embed_image: bool = True) -
         # Offline after session exit (after show_main + cursor restore):
         # JPEG/PNG encode + file write no longer hold the hop lock.
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
-        # PNG nur auf Wunsch (VISION_DESKTOPS_SAVE_CAPTURES), s. state.py.
-        path = state.save_capture(f"{desktop}-desk-{stamp}.png",
-                                  capture.to_png(data, w, h))
+        # PNG nur WENN auch gespeichert wird (VISION_DESKTOPS_SAVE_CAPTURES):
+        # save_capture() wuerde bei Default ablehnen, das PNG waere aber
+        # schon kodiert - vermeidbarer zweite Encode pro Aufruf.
+        path = None
+        if state.captures_enabled():
+            path = state.save_capture(f"{desktop}-desk-{stamp}.png",
+                                      capture.to_png(data, w, h))
         meta = {"desktop": desktop,
                 "size_px": [w, h], "origin_px": [ox, oy],
                 "image_px": list(capture.fit_width(w, h, max(320, max_width))),

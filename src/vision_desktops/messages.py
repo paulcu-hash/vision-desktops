@@ -119,6 +119,18 @@ SEE_HINT = (
     "scale coordinates per axis by size_px/image_px."
 )
 
+SEE_UNCHANGED_HINT = (
+    "Window is pixel-identical to your last see of it: that screenshot is "
+    "still valid, no new image is embedded (saves tokens). Coordinates from "
+    "it still apply unchanged. A later see returns an image as soon as "
+    "pixels differ."
+)
+
+REGION_ERROR = (
+    "region must be 'x,y,w,h' in client pixels of this window "
+    "(e.g. '0,0,640,400'), all values integers, width/height > 0."
+)
+
 DESKTOP_SEE_HINT = (
     "Pass coordinates from this image directly to desktop_click/type/key. "
     "Screen coordinate = origin_px + image pixel. "

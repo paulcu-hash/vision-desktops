@@ -37,7 +37,7 @@ remember main -> target desktop -> click/type -> back on main -> next ...
 | `desktop_create` / `desktop_list` / `desktop_remove` | Background desktops (pyvda). Remove parks survivors on graveyard, never on Main |
 | `app_launch` | Launch any exe on the target desktop + event-driven retrieval (proven ownership only) |
 | `window_list` | Windows of a desktop (hwnd, title, class) |
-| `see` | Screenshot (parallel), inline JPEG + PNG file. Sole basis for decisions |
+| `see` | Screenshot (parallel), inline JPEG. Sole basis for decisions. Sparse: unchanged windows answer text only (no image bytes), `region='x,y,w,h'` captures just that crop, `max_width=640` for a compact image (PNG file only with `VISION_DESKTOPS_SAVE_CAPTURES`) |
 | `hop_click` / `hop_type` / `hop_key` / `hop_scroll` | Hopping: there -> real input -> back on main (lock-serialized). `see_after` (default true) returns the result screenshot in the SAME call - no extra `see` roundtrip; `see_after=false` = text only |
 | `desktop_see` / `desktop_click` / `desktop_type` / `desktop_key` / `desktop_scroll` | Desktop level for system UI without an app window (Start/Run/Tray). Refuses Main hard |
 | `delta_list` / `delta_view` / `window_adopt` | Main delta without pixels (hwnd/PID/title/time+reason), targeted single view without retention, explicit adoption by vision verdict |

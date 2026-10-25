@@ -137,6 +137,27 @@ def to_jpeg(data: bytes, width: int, height: int, max_width: int = 1280) -> byte
     return buf.getvalue()
 
 
+def crop_bgra(data: bytes, width: int, height: int, region) -> tuple:
+    """Client-Aufnahme auf region (x, y, w, h) zuschneiden -> (data, w, h).
+
+    Sparsamkeitsgrund: das Bild wird NUR fuer den Ausschnitt kodiert -
+    ein kleiner Ausschnitt kostet deutlich weniger Encode und weniger
+    Antwort-Bytes. Rueckgabe weiterhin als BGRA-Bytes, damit alle
+    bestehenden Verbraucher (to_jpeg, pixel_diff) unveraendert bleiben."""
+    from PIL import Image
+
+    x, y, w, h = (int(v) for v in region)
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(int(width), x0 + max(0, w)), min(int(height), y0 + max(0, h))
+    if x1 <= x0 or y1 <= y0:
+        raise RuntimeError("region lies outside the window")
+    img = Image.frombuffer("RGBA", (width, height), data, "raw", "BGRA")
+    img = img.crop((x0, y0, x1, y1))
+    # PIL speichert RGBA; zurueck in die BGRA-Bytefolge der Verbraucher.
+    r, g, b, a = img.split()
+    return Image.merge("RGBA", (b, g, r, a)).tobytes(), img.width, img.height
+
+
 def screen_origin() -> tuple:
     """Virtual screen origin (ox, oy). Fast, no pixels involved."""
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
