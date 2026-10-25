@@ -546,8 +546,10 @@ def do_hop(desktop_id: str, hwnd: int, action: str, payload: dict) -> dict:
     The global lock lets any number of desktops/loops work
     interleaved without stealing each other's mouse/keyboard.
     """
-    with desktop_session(desktop_id) as home:
-        hopped = home != vdesk.norm_guid(desktop_id)
+    # Antwortform kuerz (Punkt 15): nur {"ok": detail}. "hopped"/"home"
+    # waren reine Diagnosefelder (GUID-Abgleich) - kein Konsument liest sie,
+    # und jede Hop-Antwort soll unter ca. 100 Zeichen bleiben.
+    with desktop_session(desktop_id):
         _foreground(hwnd)
         if action == "type":
             _await_focus(hwnd)  # Caret rule: no typing without focus in the field.
@@ -556,7 +558,7 @@ def do_hop(desktop_id: str, hwnd: int, action: str, payload: dict) -> dict:
             _settle_after_type(payload)
         else:
             time.sleep(0.25)
-        return {"ok": detail, "hopped": hopped, "home": home}
+        return {"ok": detail}
 
 
 def do_hop_desktop(desktop_id: str, action: str, payload: dict) -> dict:
@@ -569,14 +571,14 @@ def do_hop_desktop(desktop_id: str, action: str, payload: dict) -> dict:
     real-mode path (_mouse_click/_type_unicode/_combo) - no third path.
     The Main/host desktop is hard-refused (assertion in _enter_desktop).
     """
-    with desktop_session(desktop_id) as home:
-        hopped = home != vdesk.norm_guid(desktop_id)
+    # Wie do_hop: Antwort nur {"ok": detail} (Punkt 15, unter ca. 100 Zeichen).
+    with desktop_session(desktop_id):
         detail = _perform(0, action, payload, client_coords=False)
         if action == "type":
             _settle_after_type(payload)
         else:
             time.sleep(0.25)
-        return {"ok": detail, "hopped": hopped, "home": home}
+        return {"ok": detail}
 
 
 @contextlib.contextmanager

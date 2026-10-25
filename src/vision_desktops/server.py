@@ -107,9 +107,14 @@ retrieval.set_rest_fn(_is_rest)
 
 
 def _txt(obj) -> list:
+    """Kompakte Text-Antwort (Punkt 15): kein Einruecken, keine Leerzeichen
+    nach Komma/Doppelpunkt - jede Antwort war vorher um Faktor 2-3 groesser
+    als der Inhalt (indent=2 pro Liste/Dict-Ebene)."""
     if isinstance(obj, str):
         return [TextContent(type="text", text=obj)]
-    return [TextContent(type="text", text=json.dumps(obj, ensure_ascii=False, indent=2))]
+    return [TextContent(type="text",
+                        text=json.dumps(obj, ensure_ascii=False,
+                                        separators=(",", ":")))]
 
 
 def _err(msg: str):
@@ -688,10 +693,14 @@ def app_launch(desktop: str, exe: str, args: str = "", wait_seconds: float = 20)
 
 @mcp.tool()
 def window_list(desktop: str) -> list:
-    """Live top-level windows of a desktop (hwnd, pid, title, class)."""
+    """Live top-level windows of a desktop (hwnd, pid, title).
+
+    Class/rect are intentionally not included (Punkt 15, answer size):
+    the agent picks windows by hwnd/title from the screenshot anyway;
+    class was never a decision basis in the vision loop."""
     try:
         rec = _require_desktop(desktop)
-        wins = [{"hwnd": w["hwnd"], "pid": w["pid"], "title": w["title"], "class": w["class"], "rect": w.get("rect")}
+        wins = [{"hwnd": w["hwnd"], "pid": w["pid"], "title": w["title"]}
                 for w in _windows_of(rec)]
         return _txt({"desktop": desktop, "windows": wins})
     except Exception as exc:  # noqa: BLE001
